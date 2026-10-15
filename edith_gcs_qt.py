@@ -17,8 +17,8 @@ from typing import Any, Dict, Iterable
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QLinearGradient, QPolygonF
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QApplication, QDialog, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -168,7 +168,6 @@ class MapCanvas(QWidget):
         self.setMinimumSize(420, 285)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.frame: Dict[str, Any] = default_frame()
-        self.night = False
         self.extra_waypoint: tuple[float, float] | None = None
         self.route = list(SIMULATION_ROUTE)
 
@@ -189,10 +188,10 @@ class MapCanvas(QWidget):
     def paintEvent(self, event) -> None:  # type: ignore[override]
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor("#17253a" if self.night else "#1d2b3e"))
+        p.fillRect(self.rect(), QColor("#1d2b3e"))
         area = self._area()
-        p.fillRect(area, QColor("#3c514e" if self.night else "#677976"))
-        p.setPen(QPen(QColor(255, 255, 255, 26) if self.night else QColor(210, 224, 220, 42), 1))
+        p.fillRect(area, QColor("#677976"))
+        p.setPen(QPen(QColor(210, 224, 220, 42), 1))
         for i in range(15):
             x = area.left() + i / 14 * area.width()
             p.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
@@ -212,7 +211,7 @@ class MapCanvas(QWidget):
             (0.08, 0.86), (0.08, 0.70), (0.03, 0.69), (0.04, 0.50), (0.09, 0.49),
             (0.09, 0.35), (0.05, 0.34),
         ])
-        p.setBrush(QBrush(QColor("#c9cbca" if not self.night else "#9da5a2")))
+        p.setBrush(QBrush(QColor("#c9cbca")))
         p.setPen(QPen(QColor("#0a1112"), 3))
         p.drawPolygon(free_space)
 
@@ -222,7 +221,7 @@ class MapCanvas(QWidget):
             [(0.49, 0.23), (0.52, 0.23), (0.52, 0.40), (0.49, 0.40)],
             [(0.57, 0.61), (0.78, 0.61), (0.78, 0.70), (0.65, 0.70), (0.64, 0.66), (0.57, 0.66)],
         ]
-        p.setBrush(QBrush(QColor("#5e6d6a" if not self.night else "#465855")))
+        p.setBrush(QBrush(QColor("#5e6d6a")))
         p.setPen(QPen(QColor("#15201f"), 2))
         for obstacle in obstacles:
             p.drawPolygon(occupancy_polygon(obstacle))
@@ -230,7 +229,7 @@ class MapCanvas(QWidget):
         for x, y, width, height in ((.13, .17, .018, .06), (.39, .10, .025, .035), (.76, .32, .02, .02), (.82, .51, .012, .02), (.47, .78, .02, .02), (.33, .79, .014, .025), (.88, .45, .015, .015)):
             p.fillRect(QRectF(area.left() + x * area.width(), area.top() + y * area.height(), width * area.width(), height * area.height()), QColor("#121c1c"))
 
-        p.setPen(QColor("#e8f0ed" if self.night else "#dce7e2"))
+        p.setPen(QColor("#dce7e2"))
         p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
         p.drawText(QPointF(area.left() + 10, area.bottom() - 10), "SIMULATED OCCUPANCY MAP")
         for index, grid_label in enumerate("ABCDEFGH"):
@@ -312,50 +311,6 @@ class MapCanvas(QWidget):
         self.update()
 
 
-class PreFlightDialog(QDialog):
-    def __init__(self, manager: DataPluginManager, parent=None) -> None:
-        super().__init__(parent)
-        self.manager = manager
-        self.setWindowTitle("NIDAR Pre-Flight & Data Source")
-        self.setMinimumWidth(480)
-        layout = QVBoxLayout(self)
-        layout.addWidget(label("PRE-FLIGHT CHECK", 12, True))
-        layout.addWidget(label("Select the source feeding this desktop console. Missing data remains visibly waiting.", 8, False, PALETTE["muted"]))
-        self.source = QComboBox()
-        self.source.addItems(["Simulation", "JSON file", "HTTP JSON"])
-        self.source.setCurrentText(manager.source)
-        layout.addWidget(self.source)
-        self.endpoint = QLineEdit(manager.http_endpoint)
-        self.endpoint.setPlaceholderText("http://127.0.0.1:8080/mission   (HTTP JSON only)")
-        layout.addWidget(self.endpoint)
-        self.source_hint = label("", 8, False, PALETTE["muted"])
-        layout.addWidget(self.source_hint)
-        for text in ("Mission controls checked", "Emergency return-to-launch path available", "Data source state visible to operator"):
-            check = QCheckBox(text)
-            check.setChecked(True)
-            check.setEnabled(False)
-            layout.addWidget(check)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply_source)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self.source.currentTextChanged.connect(self.update_hint)
-        self.update_hint()
-
-    def update_hint(self) -> None:
-        name = self.source.currentText()
-        if name == "JSON file":
-            hint = f"Watching {self.manager.data_dir / 'mission.json'}"
-        elif name == "HTTP JSON":
-            hint = "Endpoint is polled every two seconds with a short timeout."
-        else:
-            hint = "Built-in synthetic feed; no vehicle or external system is controlled."
-        self.source_hint.setText(hint)
-        self.endpoint.setEnabled(name == "HTTP JSON")
-
-    def apply_source(self) -> None:
-        self.manager.select(self.source.currentText(), self.endpoint.text())
-        self.accept()
 
 
 class ComponentDetailsDialog(QDialog):
@@ -419,7 +374,6 @@ class NidarRescueGCS(QMainWindow):
         self.setWindowTitle("NIDAR RESCUE GCS — AIRMOUSE SKELETAL V1")
         self.resize(1450, 900)
         self.setMinimumSize(1050, 650)
-        self.night = False
         self.pilot_window: PilotViewDialog | None = None
         self.frame = default_frame()
         self.manager = DataPluginManager(Path(__file__).resolve().parent / "data")
@@ -475,12 +429,6 @@ class NidarRescueGCS(QMainWindow):
         self.comm_label = label("COMM: CONNECTED · 98%", 8, True)
         self.comm_label.setObjectName("commPill")
         row.addWidget(self.comm_label)
-        preflight = QPushButton("Pre-Flight")
-        preflight.clicked.connect(self.open_preflight)
-        row.addWidget(preflight)
-        self.night_button = QPushButton("NIGHT")
-        self.night_button.clicked.connect(self.toggle_night)
-        row.addWidget(self.night_button)
         return bar
 
     def _left_column(self) -> QWidget:
@@ -724,10 +672,7 @@ class NidarRescueGCS(QMainWindow):
         return frame
 
     def _apply_theme(self) -> None:
-        if self.night:
-            background, card, ink, line = "#101827", "#172337", "#eff6ff", "#2d405a"
-        else:
-            background, card, ink, line = PALETTE["canvas"], PALETTE["card"], PALETTE["ink"], PALETTE["line"]
+        background, card, ink, line = PALETTE["canvas"], PALETTE["card"], PALETTE["ink"], PALETTE["line"]
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{ background:{background}; color:{ink}; font-family:'Segoe UI'; }}
             QFrame#header, QFrame#card, QFrame#eventBar {{ background:{card}; border:1px solid {line}; border-radius:4px; }}
@@ -754,14 +699,7 @@ class NidarRescueGCS(QMainWindow):
             button.setProperty("active", name == "Mission")
             button.style().unpolish(button)
             button.style().polish(button)
-        self.map_canvas.night = self.night
         self.map_canvas.update()
-
-    def toggle_night(self) -> None:
-        self.night = not self.night
-        self.night_button.setText("DAY" if self.night else "NIGHT")
-        self._apply_theme()
-        self.log_event(f"[UI] {'Night' if self.night else 'Day'} operator theme enabled.")
 
     def select_tab(self, name: str) -> None:
         for tab, button in self.tabs.items():
@@ -808,12 +746,6 @@ class NidarRescueGCS(QMainWindow):
             self.pilot_window.sync_zoom(value)
         self.camera.update()
 
-    def open_preflight(self) -> None:
-        dialog = PreFlightDialog(self.manager, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.frame = default_frame()
-            self.log_event(f"[DATA] Source selected: {self.manager.source} ({self.manager.source_hint}).")
-            self._poll_data()
 
     def open_component_details(self) -> None:
         dialog = ComponentDetailsDialog(self.frame, self.last_source_status, self)

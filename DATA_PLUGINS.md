@@ -1,10 +1,10 @@
 # NIDAR data plugins
 
-The GCS ships with three safe, dependency-free sources selected from **Pre-Flight**:
+The GCS ships with three safe, dependency-free sources:
 
 - **Simulation**: deterministic preview data; it is never presented as real hardware data.
 - **JSON file**: edits to `data/mission.json` are detected while the GCS is open. A ROS 2/PX4 bridge can atomically write this normalized object.
-- **HTTP JSON**: set `NIDAR_HTTP_FEED` before launch or supply an endpoint in Pre-Flight. The source is polled every two seconds with a short timeout.
+- **HTTP JSON**: set `NIDAR_HTTP_FEED` before launch to poll an endpoint every two seconds with a short timeout.
 
 The accepted keys are the ones shown in `data/mission.json`; all keys are optional. Nested `telemetry`, `drone`, `sensors`, `health`, `components`, and `component_status` objects are merged with safe defaults. `components` controls the ten runtime rows in the main panel (for example `{"LiDAR": "CONNECTED", "Vision AI": "READY"}`). `component_status` is keyed by the 14 inventory IDs in the **DETAILS** dialog (for example `{"lidar": "CONNECTED", "ai_compute": "READY"}`). The UI exposes live status for Flight Controller, Camera, LiDAR, SLAM/Localization, Mapping Engine, Vision AI, Wi-Fi, MAVLink, Emergency System, and the active Data Plugin. Use `survivors` as an array of objects with `id`, `status`, `grid`, `x`, `y`, `confidence`, and optional `movement` / `detected_at` fields for the operator detection rows.
 

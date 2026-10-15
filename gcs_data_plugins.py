@@ -181,7 +181,7 @@ class HttpJsonPlugin(DataPlugin):
 
     def poll(self) -> PluginResult:
         if not self.endpoint:
-            return PluginResult(status="WAITING", detail="Set NIDAR_HTTP_FEED or configure it in Pre-Flight")
+            return PluginResult(status="WAITING", detail="Set NIDAR_HTTP_FEED environment variable or use JSON file")
         now = time.monotonic()
         if now - self._last_poll < 2.0:
             return PluginResult(frame=self._last_frame, status="CONNECTED" if self._last_frame else "WAITING", detail=self.endpoint)
