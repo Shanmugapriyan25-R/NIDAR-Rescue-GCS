@@ -1,0 +1,37 @@
+{
+  "mode": "AUTONOMOUS",
+  "phase": "EXPLORING",
+  "coverage": 64,
+  "target": "S01",
+  "source_label": "JSON FILE FEED",
+  "telemetry": {"battery": 87, "voltage": 22.4, "current": 8.2, "link_ms": 37, "quality": 98},
+  "drone": {"x": 7.0, "y": 6.0, "heading": 228, "altitude": 2.35, "speed": 1.19},
+  "components": {
+    "Flight Controller": "PLANNED",
+    "Camera": "PLANNED",
+    "LiDAR": "PLANNED",
+    "SLAM / Localization": "PLANNED",
+    "Mapping Engine": "PLANNED",
+    "Vision AI": "PLANNED",
+    "Wi-Fi": "PLANNED",
+    "MAVLink": "PLANNED",
+    "Emergency System": "PLANNED",
+    "Data Plugin": "READY"
+  },
+  "component_status": {
+    "flight_stack": "PLANNED",
+    "lidar": "PLANNED",
+    "ai_compute": "PLANNED",
+    "ros_host": "PLANNED",
+    "camera": "PLANNED",
+    "elrs_rx_primary": "PLANNED",
+    "elrs_rx_secondary": "PLANNED",
+    "elrs_tx": "PLANNED",
+    "optical_flow": "PLANNED",
+    "dji_o4": "PLANNED",
+    "airframe": "PLANNED",
+    "charger": "PLANNED",
+    "battery": "PLANNED",
+    "router": "PLANNED"
+  }
+}
