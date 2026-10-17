@@ -62,12 +62,15 @@ class EdithGCSBridge(Node if ROS2_AVAILABLE else object):
         self.telemetry: Dict[str, Any] = {
             "type": "telemetry",
             "mode": "live" if ROS2_AVAILABLE else "simulation",
-            "phase": "EXPLORING",
+            "phase": "READY",
             "mission_seconds": 0,
-            "coverage": 64,
-            "drone": {"x": 7.0, "y": 6.0, "z": 2.35, "yaw": 228.0, "altitude": 2.35, "speed": 1.19},
-            "battery": {"percent": 87, "voltage": 22.4, "current": 8.2},
-            "telemetry": {"battery": 87, "voltage": 22.4, "current": 8.2, "link_ms": 37, "quality": 98, "mode": "RTL / LAND"},
+            "coverage": 0,
+            "target_count": "0 / 6",
+            "detected_count": 0,
+            "total_targets": 6,
+            "drone": {"x": 1.5, "y": 1.5, "z": 2.35, "yaw": 90.0, "altitude": 2.35, "speed": 0.0},
+            "battery": {"percent": 87, "voltage": 22.4, "current": 1.5},
+            "telemetry": {"battery": 87, "voltage": 22.4, "current": 1.5, "link_ms": 35, "quality": 98, "mode": "AUTONOMOUS"},
             "sensors": {
                 "lidar": "ACTIVE",
                 "radar": "ACTIVE",
@@ -77,44 +80,22 @@ class EdithGCSBridge(Node if ROS2_AVAILABLE else object):
                 "connected": "ACTIVE",
             },
             "health": {
-                "Jetson Orin": "OK",
-                "Jetson Gimbal / Mount": "OK",
-                "RPLIDAR C1": "OK",
+                "Jetson Orin": "OK (SIM)",
+                "Jetson Gimbal / Mount": "OK (SIM)",
+                "RPLIDAR C1": "OK (SIM)",
                 "ROS 2 Bridge": "OK" if ROS2_AVAILABLE else "SIMULATED",
-                "MAVLink": "OK",
+                "MAVLink": "OK (SIM)",
             },
             "targets": [
-                {
-                    "id": "S01",
-                    "number": "01",
-                    "grid": "A1",
-                    "confidence": 93,
-                    "status": "STABLE",
-                    "x": 2.7,
-                    "y": 3.75,
-                    "lat": 10.8462,
-                    "lon": 76.2711,
-                    "bbox": [0.15, 0.20, 0.25, 0.35],
-                    "movement": "STABLE",
-                    "detected_at": "14:52",
-                },
-                {
-                    "id": "S02",
-                    "number": "02",
-                    "grid": "C4",
-                    "confidence": 87,
-                    "status": "MOVING",
-                    "x": 7.8,
-                    "y": 5.25,
-                    "lat": 10.8468,
-                    "lon": 76.2719,
-                    "bbox": [0.45, 0.30, 0.58, 0.48],
-                    "movement": "MOVING",
-                    "detected_at": "14:53",
-                },
+                {"id": "S01", "number": "01", "grid": "A1", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
+                {"id": "S02", "number": "02", "grid": "C4", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
+                {"id": "S03", "number": "03", "grid": "B3", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
+                {"id": "S04", "number": "04", "grid": "D2", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
+                {"id": "S05", "number": "05", "grid": "F5", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
+                {"id": "S06", "number": "06", "grid": "G8", "status": "SEARCHING", "confidence": None, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE", "x": None, "y": None},
             ],
             "active_waypoints": [
-                (1.2, 1.2), (1.2, 4.2), (3.5, 4.2), (7.2, 4.0), (11.2, 8.5)
+                (1.5, 1.5), (2.7, 3.8), (5.5, 4.0), (7.8, 5.25), (3.0, 8.25), (7.0, 11.0), (11.5, 4.8), (12.2, 9.5), (1.5, 1.5)
             ],
         }
 
@@ -189,36 +170,109 @@ class EdithGCSBridge(Node if ROS2_AVAILABLE else object):
 
         logger.info(f"Received GCS Command: {cmd} (ID: {cmd_id}) with params {params}")
 
-        if cmd in {"ABORT", "EMERGENCY_ABORT", "RTL"}:
-            self.telemetry["telemetry"]["mode"] = "RTL / LAND"
-            self.telemetry["phase"] = "RTL"
+        if cmd in {"START_MISSION", "START_AUTONOMOUS_MISSION"}:
+            self.telemetry["telemetry"]["mode"] = "AUTONOMOUS"
+            self.telemetry["phase"] = "AUTONOMOUS SEARCH"
             return {
                 "type": "command_ack",
                 "command_id": cmd_id,
                 "command": cmd,
                 "status": "ACCEPTED",
-                "message": "Emergency abort / RTL commanded successfully.",
+                "message": "Autonomous search mission started.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"PAUSE_MISSION", "SAFE_HOLD"}:
+            self.telemetry["telemetry"]["mode"] = "PAUSED / SAFE HOLD"
+            self.telemetry["phase"] = "PAUSED / SAFE HOLD"
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": "Mission paused. Drone hovering in safe hold.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"RESUME_MISSION"}:
+            self.telemetry["telemetry"]["mode"] = "AUTONOMOUS"
+            self.telemetry["phase"] = "AUTONOMOUS SEARCH"
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": "Autonomous search mission resumed.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"ABORT", "EMERGENCY_ABORT", "ABORT_MISSION"}:
+            self.telemetry["telemetry"]["mode"] = "ABORTED"
+            self.telemetry["phase"] = "ABORTED"
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": "Emergency abort executed. Immediate touchdown in progress.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"RTL", "RETURN_TO_HOME"}:
+            self.telemetry["telemetry"]["mode"] = "RETURNING HOME"
+            self.telemetry["phase"] = "RETURNING HOME"
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": "Return to launch commanded.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"RESET_MISSION", "RESET"}:
+            self.telemetry["telemetry"]["mode"] = "AUTONOMOUS"
+            self.telemetry["phase"] = "READY"
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": "Mission reset to READY state.",
                 "timestamp": time.time(),
             }
         elif cmd == "SET_MODE":
-            mode_name = params.get("mode", "MANUAL")
+            mode_name = params.get("mode", "").upper()
+            if "MANUAL" in mode_name:
+                return {
+                    "type": "command_ack",
+                    "command_id": cmd_id,
+                    "command": cmd,
+                    "status": "REJECTED",
+                    "message": "Manual flight mode is disabled. Drone operates under autonomous mission control.",
+                    "timestamp": time.time(),
+                }
             self.telemetry["telemetry"]["mode"] = mode_name
             return {
                 "type": "command_ack",
                 "command_id": cmd_id,
                 "command": cmd,
                 "status": "ACCEPTED",
-                "message": f"Flight mode set to {mode_name}.",
+                "message": f"Autonomous flight mode set to {mode_name}.",
                 "timestamp": time.time(),
             }
         elif cmd == "STAGE_WAYPOINT":
-            wp = params.get("waypoint")
+            wp = params.get("waypoint") or f"({params.get('x',0)}, {params.get('y',0)})"
             return {
                 "type": "command_ack",
                 "command_id": cmd_id,
                 "command": cmd,
                 "status": "ACCEPTED",
                 "message": f"Waypoint {wp} received by planner.",
+                "timestamp": time.time(),
+            }
+        elif cmd in {"COMMIT_WAYPOINTS", "CLEAR_WAYPOINTS"}:
+            return {
+                "type": "command_ack",
+                "command_id": cmd_id,
+                "command": cmd,
+                "status": "ACCEPTED",
+                "message": f"Command {cmd} acknowledged.",
                 "timestamp": time.time(),
             }
         else:

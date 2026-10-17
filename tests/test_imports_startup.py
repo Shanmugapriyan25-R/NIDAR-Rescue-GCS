@@ -36,7 +36,7 @@ def test_window_startup_and_geometry():
 
     assert window.windowTitle().startswith("NIDAR Rescue GCS")
     assert window.active_source == "Simulation"
-    assert window.flight_mode == "RTL / LAND"
+    assert window.flight_mode == "AUTONOMOUS"
     assert window.map_canvas is not None
     assert window.camera is not None
     assert window.donut is not None

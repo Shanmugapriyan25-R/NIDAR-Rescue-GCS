@@ -1,11 +1,35 @@
 {
   "mode": "AUTONOMOUS",
-  "phase": "EXPLORING",
+  "phase": "READY",
   "coverage": 64,
   "target": "S01",
+  "target_count": "0 / 6",
+  "detected_count": 0,
+  "total_targets": 6,
   "source_label": "JSON FILE FEED",
-  "telemetry": {"battery": 87, "voltage": 22.4, "current": 8.2, "link_ms": 37, "quality": 98},
-  "drone": {"x": 7.0, "y": 6.0, "heading": 228, "altitude": 2.35, "speed": 1.19},
+  "telemetry": {
+    "battery": 87,
+    "voltage": 22.4,
+    "current": 8.2,
+    "link_ms": 37,
+    "quality": 98,
+    "mode": "AUTONOMOUS"
+  },
+  "drone": {
+    "x": 1.5,
+    "y": 1.5,
+    "heading": 90,
+    "altitude": 2.35,
+    "speed": 1.19
+  },
+  "survivors": [
+    {"id": "S01", "number": "01", "grid": "A1", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"},
+    {"id": "S02", "number": "02", "grid": "C4", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"},
+    {"id": "S03", "number": "03", "grid": "B3", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"},
+    {"id": "S04", "number": "04", "grid": "D2", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"},
+    {"id": "S05", "number": "05", "grid": "F5", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"},
+    {"id": "S06", "number": "06", "grid": "G8", "status": "SEARCHING", "confidence": null, "tracking_status": "NOT DETECTED", "loc_status": "UNAVAILABLE"}
+  ],
   "components": {
     "Flight Controller": "PLANNED",
     "Camera": "PLANNED",
@@ -17,21 +41,5 @@
     "MAVLink": "PLANNED",
     "Emergency System": "PLANNED",
     "Data Plugin": "READY"
-  },
-  "component_status": {
-    "flight_stack": "PLANNED",
-    "lidar": "PLANNED",
-    "ai_compute": "PLANNED",
-    "ros_host": "PLANNED",
-    "camera": "PLANNED",
-    "elrs_rx_primary": "PLANNED",
-    "elrs_rx_secondary": "PLANNED",
-    "elrs_tx": "PLANNED",
-    "optical_flow": "PLANNED",
-    "dji_o4": "PLANNED",
-    "airframe": "PLANNED",
-    "charger": "PLANNED",
-    "battery": "PLANNED",
-    "router": "PLANNED"
   }
 }

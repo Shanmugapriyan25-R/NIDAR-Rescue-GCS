@@ -38,7 +38,7 @@ def test_simulation_plugin_lifecycle():
     assert sim.is_paused is False
 
     sim.reset()
-    assert sim.flight_mode == "RTL / LAND"
+    assert sim.flight_mode == "AUTONOMOUS"
     assert len(sim.staged_waypoints) == 0
 
 
@@ -59,41 +59,61 @@ def test_simulation_poll_frame_data():
     assert 0 <= telem["battery"] <= 100
     assert 18.0 <= telem["voltage"] <= 25.2
 
-    # Survivor discovery
+    # Exactly 6 designated targets
     survivors = frame["survivors"]
     assert isinstance(survivors, list)
-    assert len(survivors) >= 1  # S01 discovered at sec 0
+    assert len(survivors) == 6
+    target_ids = [s["id"] for s in survivors]
+    assert target_ids == ["S01", "S02", "S03", "S04", "S05", "S06"]
 
 
 def test_simulation_command_handling():
     sim = SimulationPlugin()
 
-    # 1. Abort
+    # 1. Start Autonomous Mission
+    ack = sim.send_command("START_MISSION")
+    assert ack["status"] == "ACCEPTED"
+    assert sim.flight_mode == "AUTONOMOUS"
+
+    # 2. Pause
+    ack = sim.send_command("PAUSE_MISSION")
+    assert ack["status"] == "ACCEPTED"
+    assert sim.flight_mode == "PAUSED / SAFE HOLD"
+
+    # 3. Resume
+    ack = sim.send_command("RESUME_MISSION")
+    assert ack["status"] == "ACCEPTED"
+    assert sim.flight_mode == "AUTONOMOUS"
+
+    # 4. Abort
     ack = sim.send_command("ABORT")
     assert ack["status"] == "ACCEPTED"
-    assert sim.flight_mode == "EMERGENCY LAND"
+    assert sim.flight_mode == "ABORTED"
 
-    # 2. RTL
+    # 5. Reset
+    ack = sim.send_command("RESET_MISSION")
+    assert ack["status"] == "ACCEPTED"
+    assert sim.flight_mode == "AUTONOMOUS"
+
+    # 6. RTL
     ack = sim.send_command("RTL")
     assert ack["status"] == "ACCEPTED"
-    assert sim.flight_mode == "RTL / LAND"
+    assert sim.flight_mode == "RETURNING HOME"
 
-    # 3. Stage Waypoint
+    # 7. Stage Waypoint
     ack = sim.send_command("STAGE_WAYPOINT", {"x": 5.5, "y": 9.2, "tag": "WP-TEST"})
     assert ack["status"] == "ACCEPTED"
     assert len(sim.staged_waypoints) == 1
 
-    # 4. Commit Waypoints
+    # 8. Commit Waypoints
     ack = sim.send_command("COMMIT_WAYPOINTS")
     assert ack["status"] == "ACCEPTED"
     assert len(sim.staged_waypoints) == 0
     assert (5.5, 9.2) in sim.accepted_waypoints
 
-    # 5. Mark Survivor
-    ack = sim.send_command("MARK_SURVIVOR", {"x": 8.0, "y": 8.0, "grid": "F6"})
-    assert ack["status"] == "ACCEPTED"
-    assert len(sim.user_marked_survivors) == 1
-    assert sim.user_marked_survivors[0]["grid"] == "F6"
+    # 9. Reject Manual Mode
+    ack = sim.send_command("SET_MODE", {"mode": "MANUAL"})
+    assert ack["status"] == "REJECTED"
 
 
 def test_json_file_plugin(tmp_path: Path):

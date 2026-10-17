@@ -48,7 +48,10 @@ from PyQt6.QtWidgets import (
 )
 
 from gcs_client import GCSClientWorker
-from gcs_data_plugins import DataPluginManager, ARENA_WIDTH_M, ARENA_HEIGHT_M
+from gcs_data_plugins import (
+    DataPluginManager, ARENA_WIDTH_M, ARENA_HEIGHT_M,
+    DESIGNATED_TARGET_IDS, MissionState
+)
 
 PALETTE = {
     "bg": "#f4f7fb",           # Soft tactical grey/blue canvas background
@@ -336,20 +339,26 @@ class CameraSurface(QWidget):
             p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
             p.drawText(QRectF(8, 38, 140, 16), Qt.AlignmentFlag.AlignCenter, "SIMULATED THERMAL (POST-FILTER)")
 
-        # 3. Dynamic Telemetry Aerial HUD (consistent with telemetry panel)
+        # 3. Dynamic Telemetry Aerial HUD (consistent with telemetry panel & reference UI)
         alt = self.telem_hud.get("altitude", 2.4)
         spd = self.telem_hud.get("speed", 1.2)
-        hdg = self.telem_hud.get("heading", 228)
         bat = self.telem_hud.get("battery", 86)
 
-        hud_bar_rect = QRectF(8, 8, w - 16, 18)
-        p.fillRect(hud_bar_rect, QColor(15, 23, 42, 175))
+        # Top-Left: Stream badge [● SIMULATED] + [1080p]
+        p.fillRect(QRectF(10, 10, 72, 18), QColor(220, 38, 38, 220))
         p.setPen(QColor("#ffffff"))
         p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        left_hud = f"📹 CAM 01 · ZOOM {self.zoom:.1f}x · FOV 84°"
-        right_hud = f"ALT: {alt}m  SPD: {spd}m/s  HDG: {hdg}°  BAT: {bat}%"
-        p.drawText(hud_bar_rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_hud)
-        p.drawText(hud_bar_rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_hud)
+        stream_tag = "● LIVE" if not self.is_simulated_stream else "● SIMULATED"
+        p.drawText(QRectF(10, 10, 72, 18), Qt.AlignmentFlag.AlignCenter, stream_tag)
+
+        p.fillRect(QRectF(86, 10, 42, 18), QColor(15, 23, 42, 190))
+        p.drawText(QRectF(86, 10, 42, 18), Qt.AlignmentFlag.AlignCenter, "1080p")
+
+        # Top-Right: Altitude, Speed, Zoom pill
+        tr_rect = QRectF(w - 170, 10, 160, 18)
+        p.fillRect(tr_rect, QColor(15, 23, 42, 190))
+        p.setPen(QColor("#ffffff"))
+        p.drawText(tr_rect, Qt.AlignmentFlag.AlignCenter, f"ALT {alt}m   SPD {spd}m/s   {self.zoom:.1f}x")
 
         # 4. Center Tactical Crosshairs
         cx, cy = w / 2, h / 2
@@ -361,10 +370,13 @@ class CameraSurface(QWidget):
 
         # 5. Dynamic AI Bounding Boxes from incoming detection events
         for det in self.active_detections:
-            sid = str(det.get("id", "S01"))
-            conf = det.get("confidence", 0)
             status = str(det.get("status", "SEARCHING")).upper()
-            bbox = det.get("bbox") or [0.4, 0.4, 0.6, 0.6]
+            bbox = det.get("bbox")
+            if status in {"SEARCHING", "NOT DETECTED", "—"} or bbox is None:
+                continue
+
+            sid = str(det.get("id", "S01"))
+            conf = det.get("confidence") or 0
 
             bx1 = bbox[0] * w
             by1 = bbox[1] * h
@@ -386,8 +398,9 @@ class CameraSurface(QWidget):
             p.drawRect(box_rect)
 
             # Detection Tag
-            tag_text = f"TARGET {sid}: {conf}% [{status}]" if not is_focused else f"TARGET {sid} [LOCKED]"
-            tag_rect = QRectF(bx1, max(0.0, by1 - 16), bw + 28, 15)
+            tag_text = f"TARGET {sid}: {conf}%" if not is_focused else f"TARGET {sid} [LOCKED]"
+            tag_w = max(bw + 12, 78.0)
+            tag_rect = QRectF(bx1, max(0.0, by1 - 16), tag_w, 15)
             p.fillRect(tag_rect, QColor(0, 0, 0, 190))
             p.setPen(QColor("#ffffff"))
             p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
@@ -469,6 +482,7 @@ class SurvivorCard(QFrame):
         title_lbl = QLabel(f"SURVIVOR {number_str}")
         title_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         title_lbl.setStyleSheet(f"color:{PALETTE['ink']};")
+        self.setToolTip(f"Designated Target {survivor_id} — Slot {number_str}")
         details.addWidget(title_lbl)
 
         grd_row = QHBoxLayout()
@@ -491,10 +505,12 @@ class SurvivorCard(QFrame):
         badge_box = QHBoxLayout()
         badge_box.setSpacing(4)
 
-        conf_pill = QLabel(f"✔ {confidence_str}")
+        is_searching = status_text in {"SEARCHING", "NOT DETECTED", "—"}
+        conf_display = "—%" if is_searching or not confidence_str or confidence_str == "0%" else f"✔ {confidence_str}"
+        conf_pill = QLabel(conf_display)
         conf_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
         conf_pill.setStyleSheet(f"""
-            color: {color_hex};
+            color: {color_hex if not is_searching else '#94a3b8'};
             background: #ffffff;
             border: 1px solid #e2e8f0;
             border-radius: 4px;
@@ -502,17 +518,24 @@ class SurvivorCard(QFrame):
         """)
         badge_box.addWidget(conf_pill)
 
-        state_pill = QLabel("STALE" if is_stale else status_text)
-        state_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        if is_stale:
+        if is_stale or status_text in {"LOST", "STALE"}:
             st_color, st_bg, st_border = PALETTE["amber"], PALETTE["amber_soft"], PALETTE["amber_border"]
-        elif status_text in {"STABLE", "FOUND"}:
+            badge_text = "LOST (STALE)" if is_stale else "LOST"
+        elif status_text in {"LOCALISED", "CONFIRMED", "FOUND"}:
             st_color, st_bg, st_border = PALETTE["green"], PALETTE["green_soft"], PALETTE["green_border"]
-        elif status_text == "MOVING":
+            badge_text = "LOCALISED"
+        elif status_text in {"TRACKING", "MOVING"}:
             st_color, st_bg, st_border = PALETTE["blue"], PALETTE["blue_soft"], PALETTE["blue_border"]
+            badge_text = "TRACKING"
+        elif status_text == "DETECTED":
+            st_color, st_bg, st_border = PALETTE["cyan"], PALETTE["blue_soft"], PALETTE["blue_border"]
+            badge_text = "DETECTED"
         else:
             st_color, st_bg, st_border = PALETTE["muted"], "#f1f5f9", PALETTE["line"]
+            badge_text = "SEARCHING"
 
+        state_pill = QLabel(badge_text)
+        state_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
         state_pill.setStyleSheet(f"""
             color: {st_color};
             background: {st_bg};
@@ -581,11 +604,13 @@ class MapCanvas(QWidget):
         self.scan_sweep = 0.0
         self.selected_target: Optional[str] = None
         self.selected_waypoint: Optional[Tuple[str, int, float, float, str]] = None
-        self.drone_pos = (7.0, 6.0)
-        self.drone_yaw = 228.0
+        self.drone_pos = (1.5, 1.5)
+        self.drone_yaw = 90.0
         self.active_survivors: List[Dict[str, Any]] = []
         self.staged_waypoints: List[Tuple[float, float, str]] = []
         self.accepted_waypoints: List[Tuple[float, float]] = []
+        self.active_waypoint_idx: int = 0
+        self.completed_waypoints: List[int] = []
 
         # Layer visibility flags
         self.layer_grid = True
@@ -621,9 +646,17 @@ class MapCanvas(QWidget):
         self.active_survivors = survivors
         self.update()
 
-    def update_waypoints(self, staged: List[Tuple[float, float, str]], accepted: List[Tuple[float, float]]) -> None:
+    def update_waypoints(
+        self,
+        staged: List[Tuple[float, float, str]],
+        accepted: List[Tuple[float, float]],
+        active_idx: int = 0,
+        completed: Optional[List[int]] = None,
+    ) -> None:
         self.staged_waypoints = staged
         self.accepted_waypoints = accepted
+        self.active_waypoint_idx = active_idx
+        self.completed_waypoints = completed or []
         self.update()
 
     def tick_anim(self) -> None:
@@ -670,10 +703,12 @@ class MapCanvas(QWidget):
                 self.update()
                 return
 
-        # Check clicks on survivors
+        # Check clicks on survivors (only localized targets)
         for s in self.active_survivors:
-            sx = s.get("x", 0.0) / ARENA_WIDTH_M * w
-            sy = (1.0 - s.get("y", 0.0) / ARENA_HEIGHT_M) * h
+            if s.get("x") is None or s.get("y") is None or s.get("status") in {"SEARCHING", "NOT DETECTED", "—"}:
+                continue
+            sx = float(s["x"]) / ARENA_WIDTH_M * w
+            sy = (1.0 - float(s["y"]) / ARENA_HEIGHT_M) * h
             dx = pos.x() - sx
             dy = pos.y() - sy
             if math.hypot(dx, dy) < 22:
@@ -695,18 +730,40 @@ class MapCanvas(QWidget):
         else:
             p.fillRect(rect, QColor("#e2e8f0"))
 
-        # 2. Accepted Waypoint Route Path
+        # 2. Accepted Autonomous Waypoint Route Path
         if self.layer_path and self.accepted_waypoints:
-            p.setPen(QPen(QColor("#2563eb"), 1.8, Qt.PenStyle.SolidLine))
-            p.setBrush(Qt.BrushStyle.NoBrush)
             last_pt: Optional[QPointF] = None
             for idx, (ax, ay) in enumerate(self.accepted_waypoints):
                 cur_pt = QPointF(ax / ARENA_WIDTH_M * w, (1.0 - ay / ARENA_HEIGHT_M) * h)
                 if last_pt:
+                    if idx <= self.active_waypoint_idx:
+                        p.setPen(QPen(QColor(PALETTE["cyan"]), 2.2, Qt.PenStyle.SolidLine))
+                    else:
+                        p.setPen(QPen(QColor("#2563eb"), 1.8, Qt.PenStyle.SolidLine))
                     p.drawLine(last_pt, cur_pt)
-                p.setPen(QPen(QColor("#2563eb"), 1.6))
-                p.setBrush(QBrush(QColor("#ffffff")))
-                p.drawEllipse(cur_pt, 4.5, 4.5)
+
+                # Differentiate completed, active, and pending waypoints
+                if idx in self.completed_waypoints:
+                    p.setPen(QPen(QColor(PALETTE["green"]), 1.8))
+                    p.setBrush(QBrush(QColor(PALETTE["green_soft"])))
+                    p.drawEllipse(cur_pt, 4.0, 4.0)
+                elif idx == self.active_waypoint_idx:
+                    pulse_r = 7.0 + 3.0 * math.sin(self.pulse_phase * 2)
+                    p.setPen(QPen(QColor(PALETTE["cyan"]), 2.0))
+                    p.setBrush(QBrush(QColor(2, 132, 199, 40)))
+                    p.drawEllipse(cur_pt, pulse_r, pulse_r)
+                    p.setPen(QPen(QColor(PALETTE["cyan"]), 2.0))
+                    p.setBrush(QBrush(QColor("#ffffff")))
+                    p.drawEllipse(cur_pt, 4.5, 4.5)
+                else:
+                    p.setPen(QPen(QColor("#2563eb"), 1.6))
+                    p.setBrush(QBrush(QColor("#ffffff")))
+                    p.drawEllipse(cur_pt, 4.0, 4.0)
+
+                p.setFont(QFont("Segoe UI", 5, QFont.Weight.Bold))
+                p.setPen(QColor(PALETTE["muted"]))
+                wp_lbl = "START" if idx == 0 else f"WP-{idx+1}"
+                p.drawText(QRectF(cur_pt.x() + 5, cur_pt.y() - 5, 38, 10), Qt.AlignmentFlag.AlignVCenter, wp_lbl)
                 last_pt = cur_pt
 
         # 3. Staged Waypoint Flight Lines
@@ -734,20 +791,25 @@ class MapCanvas(QWidget):
             p.setBrush(QBrush(QColor(37, 99, 235, 30)))
             p.drawEllipse(sel_pt, 12, 12)
 
-        # 5. Survivors & Sonar Beacons
+        # 5. Survivors & Sonar Beacons (Only localized/detected targets)
         if self.layer_survivors:
             for s in self.active_survivors:
+                if s.get("x") is None or s.get("y") is None:
+                    continue
+                if s.get("status") in {"SEARCHING", "NOT DETECTED", "—"}:
+                    continue
                 sid = str(s.get("id", "S01"))
-                sx = s.get("x", 0.0) / ARENA_WIDTH_M * w
-                sy = (1.0 - s.get("y", 0.0) / ARENA_HEIGHT_M) * h
+                sx = float(s["x"]) / ARENA_WIDTH_M * w
+                sy = (1.0 - float(s["y"]) / ARENA_HEIGHT_M) * h
                 col_hex = s.get("color_hex", "#10b981")
-                status = s.get("status", "STABLE")
+                status = str(s.get("status", "STABLE")).upper()
 
                 # Sonar pulse for active targets
-                if self.layer_sonar and (status == "MOVING" or sid == "S04"):
+                if self.layer_sonar and (status in {"MOVING", "LOST"} or sid == "S04"):
                     pulse_r = 14.0 + 8.0 * math.sin(self.pulse_phase)
-                    p.setPen(QPen(QColor(239, 68, 68, 160), 1.5, Qt.PenStyle.DashLine))
-                    p.setBrush(QBrush(QColor(239, 68, 68, 20)))
+                    pulse_col = QColor(PALETTE["amber"]) if status == "LOST" else QColor(239, 68, 68, 160)
+                    p.setPen(QPen(pulse_col, 1.5, Qt.PenStyle.DashLine))
+                    p.setBrush(QBrush(QColor(pulse_col.red(), pulse_col.green(), pulse_col.blue(), 20)))
                     p.drawEllipse(QPointF(sx, sy), pulse_r, pulse_r)
 
                 # Survivor pin
@@ -849,17 +911,17 @@ class SubsystemItemWidget(QFrame):
         self.ok_badge = QLabel("OK")
         self.ok_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         self.ok_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.ok_badge.setFixedSize(38, 18)
+        self.ok_badge.setFixedHeight(18)
+        self.ok_badge.setMinimumWidth(38)
         self.set_status("OK")
         layout.addWidget(self.ok_badge)
 
     def set_status(self, status: str) -> None:
         status_upper = status.upper()
-        self.ok_badge.setText(status_upper)
-        if "OK" in status_upper:
+        display_text = "OK (SIM)" if status_upper in {"SIM", "SIMULATED"} else status_upper
+        self.ok_badge.setText(display_text)
+        if "OK" in status_upper or "SIM" in status_upper:
             bg_col = "#10b981"
-        elif "SIM" in status_upper:
-            bg_col = "#0284c7"
         elif "WAIT" in status_upper or "WARN" in status_upper:
             bg_col = "#f59e0b"
         else:
@@ -869,6 +931,7 @@ class SubsystemItemWidget(QFrame):
             background-color: {bg_col};
             color: #ffffff;
             border-radius: 9px;
+            padding: 1px 6px;
             font-weight: bold;
         """)
 
@@ -959,7 +1022,7 @@ class NidarRescueGCS(QMainWindow):
         self.setMinimumSize(1100, 680)
 
         self.flight_seconds = 0
-        self.flight_mode = "RTL / LAND"
+        self.flight_mode = "AUTONOMOUS"
         self.active_source = "Simulation"
         self.survivor_cards: Dict[str, SurvivorCard] = {}
         self.last_survivor_signature: str = ""
@@ -977,6 +1040,7 @@ class NidarRescueGCS(QMainWindow):
         self.data_timer = QTimer(self)
         self.data_timer.timeout.connect(self._poll_data)
         self.data_timer.start(100)
+        self._poll_data()
 
         # 4. Arena animation timer (30 FPS)
         self.anim_timer = QTimer(self)
@@ -1065,7 +1129,7 @@ class NidarRescueGCS(QMainWindow):
         row.addStretch()
 
         # Flight Mode Dropdown Button
-        self.mode_pill = QPushButton("● RTL / LAND  ⌄")
+        self.mode_pill = QPushButton("● AUTONOMOUS  ⌄")
         self.mode_pill.setObjectName("modePill")
         self.mode_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         self.mode_pill.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1285,7 +1349,7 @@ class NidarRescueGCS(QMainWindow):
         surv_head.addWidget(label("SURVIVOR QUEUE", 8, True))
         surv_head.addStretch()
 
-        self.found_badge = QLabel("● 0 Found")
+        self.found_badge = QLabel("● 0 / 6 DETECTED")
         self.found_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         self.found_badge.setStyleSheet(f"""
             color: {PALETTE['green']};
@@ -1299,11 +1363,26 @@ class NidarRescueGCS(QMainWindow):
 
         # Scroll Area for dynamic survivor cards
         self.surv_scroll = QScrollArea()
+        self.surv_scroll.setObjectName("survScroll")
         self.surv_scroll.setWidgetResizable(True)
         self.surv_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.surv_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.surv_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.surv_scroll.setStyleSheet("background:transparent; border:0;")
+        self.surv_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: 0;
+            }
+            QScrollBar:vertical {
+                width: 4px;
+                background: #f1f5f9;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 2px;
+            }
+        """)
 
         self.surv_container_widget = QWidget()
         self.surv_container_widget.setStyleSheet("background:transparent;")
@@ -1442,7 +1521,7 @@ class NidarRescueGCS(QMainWindow):
 
         metric_bar.addWidget(self._divider())
         metric_bar.addWidget(label("SURVIVORS", 7, True, PALETTE["muted"]))
-        self.surv_stat_lbl = label("0 / 4", 8, True)
+        self.surv_stat_lbl = label("0 / 6", 8, True)
         metric_bar.addWidget(self.surv_stat_lbl)
 
         metric_bar.addWidget(self._divider())
@@ -1476,7 +1555,7 @@ class NidarRescueGCS(QMainWindow):
         s_head.addWidget(radar_i)
         s_head.addWidget(label("MISSION STATUS", 8, True))
         s_head.addStretch()
-        self.rtl_status_badge = QLabel("● RTL / LAND")
+        self.rtl_status_badge = QLabel("● AUTONOMOUS")
         self.rtl_status_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         self.rtl_status_badge.setStyleSheet(f"""
             color: {PALETTE['green']};
@@ -1507,11 +1586,11 @@ class NidarRescueGCS(QMainWindow):
 
         b1_txt = QVBoxLayout()
         b1_txt.setSpacing(0)
-        self.phase_lbl = label("STANDBY", 8, True)
+        self.phase_lbl = label("READY", 8, True)
         b1_txt.addWidget(self.phase_lbl)
         cov_row = QHBoxLayout()
         cov_row.setSpacing(4)
-        self.cov_summary_lbl = label("0 / 4", 8, True, PALETTE["danger"])
+        self.cov_summary_lbl = label("0 / 6", 8, True, PALETTE["danger"])
         cov_row.addWidget(self.cov_summary_lbl)
         cov_row.addWidget(label("SURVIVORS", 6, False, PALETTE["danger"]))
         cov_row.addStretch()
@@ -1693,18 +1772,35 @@ class NidarRescueGCS(QMainWindow):
         btns_row = QHBoxLayout()
         btns_row.setSpacing(8)
 
-        actions = [
-            ("🎮", "Switch to Manual", self.toggle_flight_mode),
-            ("📍", "Add Waypoint", self.start_add_waypoint),
-            ("👤", "Mark Survivor", self.mark_current_survivor),
-            ("🏠", "Return to Home", self.return_to_home),
-        ]
-        for icon_str, title_str, handler in actions:
-            btn = QPushButton(f"{icon_str}  {title_str}")
-            btn.setObjectName("actionBtn")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(handler)
-            btns_row.addWidget(btn)
+        self.btn_qa_start = QPushButton("🚀  Start Mission")
+        self.btn_qa_start.setObjectName("actionBtn")
+        self.btn_qa_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_start.clicked.connect(self.start_autonomous_mission)
+        btns_row.addWidget(self.btn_qa_start)
+
+        self.btn_qa_pause = QPushButton("⏸  Pause Hold")
+        self.btn_qa_pause.setObjectName("actionBtn")
+        self.btn_qa_pause.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_pause.clicked.connect(self.pause_mission)
+        btns_row.addWidget(self.btn_qa_pause)
+
+        self.btn_qa_resume = QPushButton("▶  Resume")
+        self.btn_qa_resume.setObjectName("actionBtn")
+        self.btn_qa_resume.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_resume.clicked.connect(self.resume_mission)
+        btns_row.addWidget(self.btn_qa_resume)
+
+        self.btn_qa_rtl = QPushButton("🏠  Return Home")
+        self.btn_qa_rtl.setObjectName("actionBtn")
+        self.btn_qa_rtl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_rtl.clicked.connect(self.return_to_home)
+        btns_row.addWidget(self.btn_qa_rtl)
+
+        self.btn_qa_reset = QPushButton("🔄  Reset Sim")
+        self.btn_qa_reset.setObjectName("actionBtn")
+        self.btn_qa_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_reset.clicked.connect(self.reset_mission)
+        btns_row.addWidget(self.btn_qa_reset)
 
         action_layout.addLayout(btns_row)
         layout.addWidget(action_card, 42)
@@ -1722,7 +1818,7 @@ class NidarRescueGCS(QMainWindow):
         abort_layout.addWidget(warn_icon)
 
         abort_txt = QVBoxLayout()
-        abort_txt.setSpacing(1)
+        abort_txt.setSpacing(2)
         a_title = QLabel("EMERGENCY ABORT")
         a_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         a_title.setStyleSheet("color: #ffffff; background: transparent;")
@@ -1732,7 +1828,18 @@ class NidarRescueGCS(QMainWindow):
         a_sub.setFont(QFont("Segoe UI", 7))
         a_sub.setStyleSheet("color: #ffffff; background: transparent; opacity: 0.9;")
         abort_txt.addWidget(a_sub)
+
+        a_sim_badge = QLabel("[SIMULATION ONLY]")
+        a_sim_badge.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        a_sim_badge.setStyleSheet("color: #fecaca; background: transparent;")
+        abort_txt.addWidget(a_sim_badge)
+
         abort_layout.addLayout(abort_txt)
+
+        abort_arrow = QLabel("›")
+        abort_arrow.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        abort_arrow.setStyleSheet("color: #ffffff; background: transparent;")
+        abort_layout.addWidget(abort_arrow)
 
         self.abort_card.mousePressEvent = lambda e: self.emergency_abort()  # type: ignore[method-assign]
         layout.addWidget(self.abort_card, 20)
@@ -1876,6 +1983,11 @@ class NidarRescueGCS(QMainWindow):
                 background: {PALETTE['blue_soft']};
                 border-color: {PALETTE['blue']};
             }}
+            QPushButton#actionBtn:disabled {{
+                background: #f8fafc;
+                border-color: #e2e8f0;
+                color: #94a3b8;
+            }}
             QFrame#abortCard {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #ef4444);
                 border: 1px solid #b91c1c;
@@ -1983,14 +2095,26 @@ class NidarRescueGCS(QMainWindow):
         self.cov_prog.setValue(coverage)
         self.cov_lbl.setText(f"{coverage}%")
 
-        # 5. Survivors / Detections
+        # 5. Survivors / Detections (Strictly 6 Designated Target Slots)
         survivors = frame.get("survivors") or frame.get("targets") or []
         self._sync_survivor_cards(survivors)
 
-        found_count = sum(1 for s in survivors if str(s.get("status", "")).upper() in {"FOUND", "STABLE", "MOVING"})
-        self.found_badge.setText(f"● {found_count} Found")
-        self.surv_stat_lbl.setText(f"{found_count} / {max(4, len(survivors))}")
-        self.cov_summary_lbl.setText(f"{found_count} / {max(4, len(survivors))}")
+        detected_count = frame.get("detected_count")
+        if detected_count is None:
+            detected_count = sum(1 for s in survivors if str(s.get("status", "")).upper() in {"DETECTED", "TRACKING", "LOCALISED", "LOST", "FOUND", "STABLE", "MOVING"})
+        total_targets = frame.get("total_targets", 6)
+
+        self.found_badge.setText(f"● {detected_count} / {total_targets} DETECTED")
+        self.surv_stat_lbl.setText(f"{detected_count} / {total_targets}")
+        self.cov_summary_lbl.setText(f"{detected_count} / {total_targets}")
+
+        # Summary color indicator
+        if detected_count == 0:
+            self.cov_summary_lbl.setStyleSheet(f"color: {PALETTE['danger']};")
+        elif detected_count == total_targets:
+            self.cov_summary_lbl.setStyleSheet(f"color: {PALETTE['green']};")
+        else:
+            self.cov_summary_lbl.setStyleSheet(f"color: {PALETTE['blue']};")
 
         # 6. Map Canvas Updates
         if isinstance(dx, (int, float)) and isinstance(dy, (int, float)):
@@ -1999,7 +2123,9 @@ class NidarRescueGCS(QMainWindow):
 
         staged_wp = frame.get("staged_waypoints", [])
         accepted_wp = frame.get("accepted_waypoints", [])
-        self.map_canvas.update_waypoints(staged_wp, accepted_wp)
+        active_wp_idx = frame.get("active_waypoint_idx", 0)
+        completed_wp = frame.get("completed_waypoints", [])
+        self.map_canvas.update_waypoints(staged_wp, accepted_wp, active_wp_idx, completed_wp)
 
         # 7. Camera Detections & Consistent Telemetry Overlay
         self.camera.set_detections(survivors)
@@ -2047,7 +2173,8 @@ class NidarRescueGCS(QMainWindow):
             sid = str(s.get("id", "S01"))
             num = str(s.get("number", sid.lstrip("S") or "01"))
             grid = str(s.get("grid", "—"))
-            conf = f"{s.get('confidence', 0)}%"
+            conf_val = s.get("confidence")
+            conf = f"{conf_val}%" if conf_val is not None else ""
             status = str(s.get("status", "SEARCHING")).upper()
             is_stale = bool(s.get("is_stale", False))
 
@@ -2055,14 +2182,15 @@ class NidarRescueGCS(QMainWindow):
             lon = s.get("lon")
             x = s.get("x")
             y = s.get("y")
-            if x is not None and y is not None:
-                coords_str = f"ENU: {x:.1f}m, {y:.1f}m"
-            elif lat is not None and lon is not None:
+            loc_tag = s.get("loc_status", "CONFIRMED" if (x is not None and y is not None) else "UNAVAILABLE")
+            if lat is not None and lon is not None:
                 coords_str = f"Lat: {lat:.4f}  Lon: {lon:.4f}"
+            elif x is not None and y is not None:
+                coords_str = f"ENU: {x:.1f}m, {y:.1f}m"
             else:
-                coords_str = "Coord: N/A"
+                coords_str = "Coordinates Unavailable"
 
-            col_hex = s.get("color_hex", "#10b981")
+            col_hex = s.get("color_hex", "#10b981") if status not in {"SEARCHING", "NOT DETECTED", "—"} else "#94a3b8"
             thumb = s.get("thumb", "assets/thumb_s1.png")
 
             card = SurvivorCard(sid, num, grid, conf, status, coords_str, col_hex, thumb, is_stale=is_stale)
@@ -2173,17 +2301,31 @@ class NidarRescueGCS(QMainWindow):
     def show_flight_mode_menu(self) -> None:
         menu = QMenu(self)
         modes = [
-            ("● RTL / LAND (Return to Launch)", "RTL / LAND"),
-            ("● MANUAL (Direct Operator Control - Simulation)", "MANUAL"),
-            ("● AUTONOMOUS (Corridor Survey Mode - Simulation)", "AUTONOMOUS"),
+            ("🚀 AUTONOMOUS (Start / Resume Search)", "START_MISSION"),
+            ("⏸ PAUSE / SAFE HOLD (Hover in Place)", "PAUSE_MISSION"),
+            ("🏠 RETURN TO HOME (RTL to Launch Pad)", "RTL"),
+            ("🛑 EMERGENCY ABORT (Immediate Touchdown)", "ABORT"),
         ]
-        for title, mode_key in modes:
+        for title, cmd_key in modes:
             act = QAction(title, menu)
-            act.triggered.connect(lambda checked, m=mode_key: self._set_flight_mode(m))
+            act.triggered.connect(lambda checked, c=cmd_key: self._on_mode_menu_action(c))
             menu.addAction(act)
         menu.exec(QCursor.pos())
 
+    def _on_mode_menu_action(self, cmd_key: str) -> None:
+        if cmd_key == "START_MISSION":
+            self.start_autonomous_mission()
+        elif cmd_key == "PAUSE_MISSION":
+            self.pause_mission()
+        elif cmd_key == "RTL":
+            self.return_to_home()
+        elif cmd_key == "ABORT":
+            self.emergency_abort()
+
     def _set_flight_mode(self, new_mode: str) -> None:
+        if "MANUAL" in new_mode.upper():
+            self.log_event("[MISSION] Manual flight mode rejected: Drone operates strictly under autonomous mission control.")
+            return
         self.dispatch_command("SET_MODE", {"mode": new_mode})
         self.flight_mode = new_mode
         self._update_flight_mode_ui()
@@ -2316,41 +2458,65 @@ class NidarRescueGCS(QMainWindow):
         info = details.get(name, "Status: OK.")
         self.log_event(f"[SUBSYSTEM] {name}: {info}")
 
-    def mark_current_survivor(self) -> None:
-        dx, dy = self.map_canvas.drone_pos
-        self.dispatch_command("MARK_SURVIVOR", {"x": dx, "y": dy})
-        self.log_event(f"[VISION] Manual survivor marker registered at drone location ({dx:.1f}m, {dy:.1f}m).")
+    def start_autonomous_mission(self) -> None:
+        self.dispatch_command("START_MISSION")
+        self.flight_mode = "AUTONOMOUS"
+        if hasattr(self, "phase_lbl"):
+            self.phase_lbl.setText("AUTONOMOUS SEARCH")
+        self._update_flight_mode_ui()
+        self.log_event("[MISSION] Autonomous search mission initiated. Target roster: S01-S06.")
+
+    def pause_mission(self) -> None:
+        self.dispatch_command("PAUSE_MISSION")
+        self.flight_mode = "PAUSED / SAFE HOLD"
+        self._update_flight_mode_ui()
+        self.log_event("[MISSION] Mission paused. Drone entering safe hold hover.")
+
+    def resume_mission(self) -> None:
+        self.dispatch_command("RESUME_MISSION")
+        self.flight_mode = "AUTONOMOUS"
+        self._update_flight_mode_ui()
+        self.log_event("[MISSION] Autonomous search mission resumed.")
 
     def return_to_home(self) -> None:
         ans = QMessageBox.question(
             self, "Return to Launch (RTL)",
-            "Command Return-to-Launch (RTL)?\nThe drone will immediately pause exploration and return to home base (1.5m, 1.5m).",
+            "Command Return-to-Launch (RTL)?\nThe drone will pause exploration and return to home base (1.5m, 1.5m).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         if ans == QMessageBox.StandardButton.Yes:
             self.dispatch_command("RTL")
-            self.flight_mode = "RTL / LAND"
+            self.flight_mode = "RETURNING HOME"
             self._update_flight_mode_ui()
-            self.log_event("[NAV] Return-to-Launch sequence commanded.")
+            self.log_event("[MISSION] Return-to-Launch sequence commanded.")
 
-    def toggle_flight_mode(self) -> None:
-        new_mode = "MANUAL" if self.flight_mode == "RTL / LAND" else "RTL / LAND"
-        self._set_flight_mode(new_mode)
+    def reset_mission(self) -> None:
+        ans = QMessageBox.question(
+            self, "Reset Mission",
+            "Reset Autonomous Search Mission Simulation?\nTelemetry and target detection roster will be reset to initial READY state.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self.dispatch_command("RESET_MISSION")
+            self.flight_mode = "AUTONOMOUS"
+            self._update_flight_mode_ui()
+            self.log_event("[MISSION] Mission simulation reset to initial READY state.")
 
     def _update_flight_mode_ui(self) -> None:
         self.mode_pill.setText(f"● {self.flight_mode}  ⌄")
-        if "RTL" in self.flight_mode:
+        if "RTL" in self.flight_mode or "RETURN" in self.flight_mode:
             self.mode_pill.setStyleSheet(f"""
                 QPushButton#modePill {{
-                    color: {PALETTE['green']};
-                    background: {PALETTE['green_soft']};
-                    border: 1px solid {PALETTE['green_border']};
+                    color: {PALETTE['amber']};
+                    background: {PALETTE['amber_soft']};
+                    border: 1px solid {PALETTE['amber_border']};
                     border-radius: 11px;
                     padding: 3px 10px;
                 }}
             """)
-        elif "EMERGENCY" in self.flight_mode:
+        elif "EMERGENCY" in self.flight_mode or "ABORT" in self.flight_mode:
             self.mode_pill.setStyleSheet(f"""
                 QPushButton#modePill {{
                     color: {PALETTE['danger']};
@@ -2360,12 +2526,22 @@ class NidarRescueGCS(QMainWindow):
                     padding: 3px 10px;
                 }}
             """)
+        elif "PAUSE" in self.flight_mode or "HOLD" in self.flight_mode:
+            self.mode_pill.setStyleSheet(f"""
+                QPushButton#modePill {{
+                    color: {PALETTE['amber']};
+                    background: {PALETTE['amber_soft']};
+                    border: 1px solid {PALETTE['amber_border']};
+                    border-radius: 11px;
+                    padding: 3px 10px;
+                }}
+            """)
         else:
             self.mode_pill.setStyleSheet(f"""
                 QPushButton#modePill {{
-                    color: {PALETTE['blue']};
-                    background: {PALETTE['blue_soft']};
-                    border: 1px solid {PALETTE['blue_border']};
+                    color: {PALETTE['green']};
+                    background: {PALETTE['green_soft']};
+                    border: 1px solid {PALETTE['green_border']};
                     border-radius: 11px;
                     padding: 3px 10px;
                 }}
@@ -2374,6 +2550,57 @@ class NidarRescueGCS(QMainWindow):
         self.rtl_status_badge.setText(f"● {self.flight_mode}")
         if "🎮 Mode" in self.telem_labels:
             self.telem_labels["🎮 Mode"].setText(self.flight_mode)
+
+        mode_upper = self.flight_mode.upper()
+        if hasattr(self, "btn_qa_start"):
+            if "ABORT" in mode_upper:
+                self.btn_qa_start.setEnabled(False)
+                self.btn_qa_pause.setEnabled(False)
+                self.btn_qa_resume.setEnabled(False)
+                self.btn_qa_rtl.setEnabled(False)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - ABORTED")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['danger']};")
+            elif "PAUSE" in mode_upper or "HOLD" in mode_upper:
+                self.btn_qa_start.setEnabled(False)
+                self.btn_qa_pause.setEnabled(False)
+                self.btn_qa_resume.setEnabled(True)
+                self.btn_qa_rtl.setEnabled(True)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - PAUSED")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['amber']};")
+            elif "RETURN" in mode_upper or "RTL" in mode_upper:
+                self.btn_qa_start.setEnabled(False)
+                self.btn_qa_pause.setEnabled(True)
+                self.btn_qa_resume.setEnabled(False)
+                self.btn_qa_rtl.setEnabled(False)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - RETURNING HOME")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['amber']};")
+            elif "COMPLETE" in mode_upper:
+                self.btn_qa_start.setEnabled(False)
+                self.btn_qa_pause.setEnabled(False)
+                self.btn_qa_resume.setEnabled(False)
+                self.btn_qa_rtl.setEnabled(True)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - COMPLETED")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['green']};")
+            elif "READY" in mode_upper or (hasattr(self, "phase_lbl") and self.phase_lbl.text().upper() in {"READY", "IDLE", "PRE-FLIGHT CHECKS"}):
+                self.btn_qa_start.setEnabled(True)
+                self.btn_qa_pause.setEnabled(False)
+                self.btn_qa_resume.setEnabled(False)
+                self.btn_qa_rtl.setEnabled(True)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - READY")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['green']};")
+            else:
+                self.btn_qa_start.setEnabled(False)
+                self.btn_qa_pause.setEnabled(True)
+                self.btn_qa_resume.setEnabled(False)
+                self.btn_qa_rtl.setEnabled(True)
+                self.btn_qa_reset.setEnabled(True)
+                self.qa_status_lbl.setText("● SIMULATION - AUTONOMOUS ACTIVE")
+                self.qa_status_lbl.setStyleSheet(f"color:{PALETTE['green']};")
 
     def emergency_abort(self) -> None:
         ans = QMessageBox.warning(
@@ -2384,9 +2611,9 @@ class NidarRescueGCS(QMainWindow):
         )
         if ans == QMessageBox.StandardButton.Yes:
             self.dispatch_command("ABORT")
-            self.flight_mode = "EMERGENCY LAND"
+            self.flight_mode = "ABORTED"
             self._update_flight_mode_ui()
-            self.log_event("[ALERT] SIMULATED EMERGENCY ABORT CONFIRMED. Real physical flight commands remain disabled.")
+            self.log_event("[ALERT] SIMULATED EMERGENCY ABORT CONFIRMED. Immediate touchdown in progress. Physical flight commands remain disabled.")
 
     def dispatch_command(self, cmd: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Route command to active source (WebSocket or Simulation plugin)."""

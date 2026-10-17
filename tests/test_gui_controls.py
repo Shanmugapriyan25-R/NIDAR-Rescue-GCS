@@ -116,17 +116,20 @@ def test_waypoint_staging_and_selection(qapp):
 
 def test_flight_mode_menu_selection(qapp):
     win = NidarRescueGCS()
+    # Manual mode should be rejected
     win._set_flight_mode("MANUAL")
-    assert win.flight_mode == "MANUAL"
-    assert win.telem_labels["🎮 Mode"].text() == "MANUAL"
-    assert "MANUAL" in win.mode_pill.text()
+    assert win.flight_mode == "AUTONOMOUS"
+
+    win._set_flight_mode("PAUSED / SAFE HOLD")
+    assert win.flight_mode == "PAUSED / SAFE HOLD"
+    assert "PAUSED" in win.mode_pill.text()
 
     win._set_flight_mode("AUTONOMOUS")
     assert win.flight_mode == "AUTONOMOUS"
     assert win.telem_labels["🎮 Mode"].text() == "AUTONOMOUS"
 
-    win._set_flight_mode("RTL / LAND")
-    assert win.flight_mode == "RTL / LAND"
+    win._set_flight_mode("RETURNING HOME")
+    assert win.flight_mode == "RETURNING HOME"
     win.close()
 
 
