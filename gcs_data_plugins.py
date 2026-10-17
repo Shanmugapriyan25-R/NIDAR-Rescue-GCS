@@ -31,7 +31,7 @@ ARENA_HEIGHT_M = 15.0
 GRID_COLS = [chr(ord('A') + i) for i in range(15)]
 GRID_ROWS = [str(15 - i) for i in range(15)]
 
-# Canonical simulation survivor candidates
+# Canonical simulation survivor candidates with discovery timeline
 SIM_SURVIVORS_MASTER = [
     {
         "id": "S01",
@@ -48,6 +48,7 @@ SIM_SURVIVORS_MASTER = [
         "thumb": "assets/thumb_s1.png",
         "color_hex": "#10b981",
         "discover_sec": 0,
+        "last_seen_sec": 0,
     },
     {
         "id": "S02",
@@ -64,6 +65,7 @@ SIM_SURVIVORS_MASTER = [
         "thumb": "assets/thumb_s2.png",
         "color_hex": "#2563eb",
         "discover_sec": 12,
+        "last_seen_sec": 12,
     },
     {
         "id": "S03",
@@ -80,6 +82,7 @@ SIM_SURVIVORS_MASTER = [
         "thumb": "assets/thumb_s3.png",
         "color_hex": "#8b5cf6",
         "discover_sec": 24,
+        "last_seen_sec": 24,
     },
     {
         "id": "S04",
@@ -96,6 +99,7 @@ SIM_SURVIVORS_MASTER = [
         "thumb": "assets/thumb_s4.png",
         "color_hex": "#ef4444",
         "discover_sec": 38,
+        "last_seen_sec": 38,
     },
 ]
 
@@ -204,6 +208,7 @@ class SimulationPlugin(DataPlugin):
         self.staged_waypoints: List[Tuple[float, float, str]] = []
         self.accepted_waypoints: List[Tuple[float, float]] = list(PATROL_WAYPOINTS[:6])
         self.user_marked_survivors: List[Dict[str, Any]] = []
+        self.active_survivors_cache: List[Dict[str, Any]] = []
 
     def start(self) -> None:
         if not self.is_running:
@@ -231,6 +236,7 @@ class SimulationPlugin(DataPlugin):
         self.phase = "EXPLORING"
         self.staged_waypoints.clear()
         self.user_marked_survivors.clear()
+        self.active_survivors_cache.clear()
 
     def get_elapsed_seconds(self) -> float:
         if not self.is_running:
@@ -244,9 +250,9 @@ class SimulationPlugin(DataPlugin):
         sim_sec = int(elapsed)
 
         # 1. Kinematics along patrol route
-        speed = 1.2 if self.flight_mode != "EMERGENCY LAND" else 0.0
+        speed = 1.2 if self.flight_mode not in {"EMERGENCY LAND", "RTL / LAND"} else (0.8 if self.flight_mode == "RTL / LAND" else 0.0)
         route = self.accepted_waypoints if self.accepted_waypoints else PATROL_WAYPOINTS
-        if len(route) >= 2:
+        if len(route) >= 2 and self.flight_mode != "EMERGENCY LAND":
             seg_duration = 6.0  # seconds per waypoint segment
             total_duration = seg_duration * (len(route) - 1)
             t_route = (elapsed * 0.8) % total_duration
@@ -266,18 +272,26 @@ class SimulationPlugin(DataPlugin):
             cur_x, cur_y, yaw = 7.0, 6.0, 228.0
 
         # Altitude & Battery
-        alt = 2.35 if self.flight_mode != "EMERGENCY LAND" else max(0.0, 2.35 - (elapsed % 10) * 0.4)
+        alt = 2.4 if self.flight_mode != "EMERGENCY LAND" else max(0.0, round(2.4 - (elapsed % 10) * 0.4, 1))
         battery_pct = max(5, int(self.base_battery - (elapsed * 0.015)))
         voltage = round(19.8 + (battery_pct / 100.0) * 3.0, 1)
 
-        # 2. Dynamic Sequential Survivor Discovery
+        # 2. Dynamic Sequential Survivor Discovery & Stale Detection
         active_survivors: List[Dict[str, Any]] = []
         for cand in SIM_SURVIVORS_MASTER:
             if sim_sec >= cand["discover_sec"]:
-                active_survivors.append(dict(cand))
+                item = dict(cand)
+                # Stale warning: if discovered > 30s ago and inactive
+                time_since_seen = sim_sec - cand.get("last_seen_sec", 0)
+                item["is_stale"] = (time_since_seen > 30 and item["status"] == "INACTIVE")
+                active_survivors.append(item)
 
         # Include any manually marked survivors
-        active_survivors.extend(self.user_marked_survivors)
+        for s in self.user_marked_survivors:
+            s_item = dict(s)
+            active_survivors.append(s_item)
+
+        self.active_survivors_cache = active_survivors
 
         # 3. Dynamic Coverage Calculation
         # Incremental coverage starting at 42% climbing to 92%
@@ -348,30 +362,33 @@ class SimulationPlugin(DataPlugin):
         if cmd_upper in {"ABORT", "EMERGENCY_ABORT"}:
             self.flight_mode = "EMERGENCY LAND"
             self.phase = "ABORTED"
-            return {"status": "ACCEPTED", "message": "Simulation emergency abort executed."}
+            return {"status": "ACCEPTED", "message": "Simulation emergency touchdown executed. Motors disarmed."}
         elif cmd_upper == "RTL":
             self.flight_mode = "RTL / LAND"
             self.phase = "RTL"
-            return {"status": "ACCEPTED", "message": "Simulation RTL commanded."}
+            return {"status": "ACCEPTED", "message": "Simulation RTL commanded. Returning to start waypoint (1.5, 1.5)."}
         elif cmd_upper == "SET_MODE":
             mode_name = params.get("mode", "MANUAL")
             self.flight_mode = mode_name
-            return {"status": "ACCEPTED", "message": f"Simulation mode set to {mode_name}."}
+            return {"status": "ACCEPTED", "message": f"Simulation flight mode set to {mode_name}."}
         elif cmd_upper == "STAGE_WAYPOINT":
             x = float(params.get("x", 0.0))
             y = float(params.get("y", 0.0))
             tag = str(params.get("tag", f"WP-{len(self.staged_waypoints)+1}"))
             self.staged_waypoints.append((x, y, tag))
-            return {"status": "ACCEPTED", "message": f"Waypoint {tag} staged locally."}
+            return {"status": "ACCEPTED", "message": f"Waypoint {tag} staged at ({x}m, {y}m)."}
         elif cmd_upper == "COMMIT_WAYPOINTS":
-            # Promote staged waypoints to accepted waypoints
+            if not self.staged_waypoints:
+                return {"status": "REJECTED", "message": "No staged waypoints to commit."}
             new_pts = [(w[0], w[1]) for w in self.staged_waypoints]
             self.accepted_waypoints.extend(new_pts)
+            count = len(self.staged_waypoints)
             self.staged_waypoints.clear()
-            return {"status": "ACCEPTED", "message": "Staged waypoints committed to flight planner."}
+            return {"status": "ACCEPTED", "message": f"{count} staged waypoints committed to active flight plan."}
         elif cmd_upper == "CLEAR_WAYPOINTS":
+            count = len(self.staged_waypoints)
             self.staged_waypoints.clear()
-            return {"status": "ACCEPTED", "message": "Staged waypoints cleared."}
+            return {"status": "ACCEPTED", "message": f"{count} staged waypoints cleared."}
         elif cmd_upper == "MARK_SURVIVOR":
             surv_id = f"S{len(self.user_marked_survivors) + 5:02d}"
             new_s = {
@@ -389,9 +406,41 @@ class SimulationPlugin(DataPlugin):
                 "thumb": "assets/thumb_s1.png",
                 "color_hex": "#06b6d4",
                 "discover_sec": 0,
+                "last_seen_sec": int(self.get_elapsed_seconds()),
             }
             self.user_marked_survivors.append(new_s)
-            return {"status": "ACCEPTED", "message": f"Survivor {surv_id} marked manually."}
+            return {"status": "ACCEPTED", "message": f"Survivor {surv_id} marked manually at ({new_s['x']}m, {new_s['y']}m)."}
+        elif cmd_upper == "ADD_DETECTION":
+            det_id = str(params.get("id", f"S{len(self.user_marked_survivors)+10:02d}"))
+            new_det = {
+                "id": det_id,
+                "number": det_id.lstrip("S") or "10",
+                "grid": params.get("grid", "B2"),
+                "x": float(params.get("x", 4.0)),
+                "y": float(params.get("y", 4.0)),
+                "lat": float(params.get("lat", 10.8465)),
+                "lon": float(params.get("lon", 76.2715)),
+                "confidence": int(params.get("confidence", 85)),
+                "status": params.get("status", "FOUND"),
+                "movement": params.get("movement", "STABLE"),
+                "bbox": params.get("bbox", [0.3, 0.3, 0.45, 0.45]),
+                "thumb": "assets/thumb_s1.png",
+                "color_hex": "#10b981",
+                "discover_sec": 0,
+                "last_seen_sec": int(self.get_elapsed_seconds()),
+            }
+            self.user_marked_survivors.append(new_det)
+            return {"status": "ACCEPTED", "message": f"Sample detection {det_id} injected."}
+        elif cmd_upper == "REMOVE_DETECTION":
+            target_id = params.get("id", "")
+            before_len = len(self.user_marked_survivors)
+            self.user_marked_survivors = [s for s in self.user_marked_survivors if s["id"] != target_id]
+            if len(self.user_marked_survivors) < before_len:
+                return {"status": "ACCEPTED", "message": f"Detection {target_id} removed."}
+            return {"status": "REJECTED", "message": f"Detection {target_id} not found."}
+        elif cmd_upper == "CLEAR_DETECTIONS":
+            self.user_marked_survivors.clear()
+            return {"status": "ACCEPTED", "message": "Manual detections cleared."}
 
         return {"status": "REJECTED", "message": f"Unknown command: {cmd}"}
 

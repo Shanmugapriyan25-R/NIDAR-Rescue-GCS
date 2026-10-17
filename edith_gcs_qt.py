@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NIDAR Rescue GCS — Exact Modern Light Tactical UI (v2) Fully Functional.
+"""NIDAR Rescue GCS — Exact Modern Light Tactical UI (v2) Phase 2 Fully Functional.
 
 Faithfully implements the complete reference interface from reference_ui_v2.jpg:
 - NO vertical sidebar (sidebar removed as requested).
@@ -228,6 +228,12 @@ class CameraSurface(QWidget):
         self.highlighted_person: Optional[str] = None
         self.bg_pixmap = QPixmap("assets/camera_feed_bg.png")
         self.active_detections: List[Dict[str, Any]] = []
+        self.telem_hud: Dict[str, Any] = {
+            "altitude": 2.4,
+            "speed": 1.2,
+            "heading": 228,
+            "battery": 86,
+        }
         self.is_simulated_stream = True
         self.setMinimumHeight(185)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -260,6 +266,11 @@ class CameraSurface(QWidget):
 
     def set_detections(self, detections: List[Dict[str, Any]]) -> None:
         self.active_detections = detections
+        self.update()
+
+    def set_telemetry(self, telem: Dict[str, Any]) -> None:
+        """Receive unified telemetry matching the main dashboard exactly."""
+        self.telem_hud.update(telem)
         self.update()
 
     def save_snapshot_to_disk(self) -> str:
@@ -303,6 +314,7 @@ class CameraSurface(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         rect = self.rect()
+        w, h = rect.width(), rect.height()
 
         # 1. Base feed
         if not self.bg_pixmap.isNull():
@@ -318,14 +330,36 @@ class CameraSurface(QWidget):
             p.fillRect(rect, QColor(0, 210, 255, 90))
             p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
-            # Thermal tag banner
-            p.fillRect(QRectF(8, 38, 78, 16), QColor(0, 0, 0, 180))
+            # Thermal tag banner (truthfully labelled)
+            p.fillRect(QRectF(8, 38, 140, 16), QColor(0, 0, 0, 180))
             p.setPen(QColor("#00f2fe"))
-            p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-            p.drawText(QRectF(8, 38, 78, 16), Qt.AlignmentFlag.AlignCenter, "FLIR THERMAL")
+            p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            p.drawText(QRectF(8, 38, 140, 16), Qt.AlignmentFlag.AlignCenter, "SIMULATED THERMAL (POST-FILTER)")
 
-        # 3. Dynamic AI Bounding Boxes from incoming detection events
-        w, h = rect.width(), rect.height()
+        # 3. Dynamic Telemetry Aerial HUD (consistent with telemetry panel)
+        alt = self.telem_hud.get("altitude", 2.4)
+        spd = self.telem_hud.get("speed", 1.2)
+        hdg = self.telem_hud.get("heading", 228)
+        bat = self.telem_hud.get("battery", 86)
+
+        hud_bar_rect = QRectF(8, 8, w - 16, 18)
+        p.fillRect(hud_bar_rect, QColor(15, 23, 42, 175))
+        p.setPen(QColor("#ffffff"))
+        p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        left_hud = f"📹 CAM 01 · ZOOM {self.zoom:.1f}x · FOV 84°"
+        right_hud = f"ALT: {alt}m  SPD: {spd}m/s  HDG: {hdg}°  BAT: {bat}%"
+        p.drawText(hud_bar_rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, left_hud)
+        p.drawText(hud_bar_rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, right_hud)
+
+        # 4. Center Tactical Crosshairs
+        cx, cy = w / 2, h / 2
+        p.setPen(QPen(QColor(255, 255, 255, 120), 1.0))
+        p.drawLine(QPointF(cx - 15, cy), QPointF(cx - 4, cy))
+        p.drawLine(QPointF(cx + 4, cy), QPointF(cx + 15, cy))
+        p.drawLine(QPointF(cx, cy - 15), QPointF(cx, cy - 4))
+        p.drawLine(QPointF(cx, cy + 4), QPointF(cx, cy + 15))
+
+        # 5. Dynamic AI Bounding Boxes from incoming detection events
         for det in self.active_detections:
             sid = str(det.get("id", "S01"))
             conf = det.get("confidence", 0)
@@ -352,24 +386,24 @@ class CameraSurface(QWidget):
             p.drawRect(box_rect)
 
             # Detection Tag
-            tag_text = f"{sid} {conf}% [{status}]"
-            tag_rect = QRectF(bx1, max(0.0, by1 - 16), bw + 24, 15)
+            tag_text = f"TARGET {sid}: {conf}% [{status}]" if not is_focused else f"TARGET {sid} [LOCKED]"
+            tag_rect = QRectF(bx1, max(0.0, by1 - 16), bw + 28, 15)
             p.fillRect(tag_rect, QColor(0, 0, 0, 190))
             p.setPen(QColor("#ffffff"))
             p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
             p.drawText(tag_rect, Qt.AlignmentFlag.AlignCenter, tag_text)
 
-        # 4. Stream status watermark
-        watermark_text = "SIMULATION STREAM · SOFTWARE TEST" if self.is_simulated_stream else "LIVE AIR UNIT STREAM"
+        # 6. Stream status watermark
+        watermark_text = "SIMULATED VIDEO (NO PHYSICAL AIR UNIT)" if self.is_simulated_stream else "LIVE CAMERA (AIR UNIT CONNECTED)"
         p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        p.setPen(QColor(255, 255, 255, 160))
-        p.drawText(QRectF(8, h - 20, 200, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, watermark_text)
+        p.setPen(QColor(255, 255, 255, 170))
+        p.drawText(QRectF(8, h - 20, 260, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, watermark_text)
 
-        # 5. Shutter flash animation
+        # 7. Shutter flash animation
         if self.shutter_flash:
             p.fillRect(rect, QColor(255, 255, 255, 220))
 
-        # 6. Recording banner if active
+        # 8. Recording banner if active
         if self.is_recording:
             p.fillRect(QRectF(rect.width() - 85, 38, 78, 16), QColor(220, 38, 38, 200))
             p.setPen(QColor("#ffffff"))
@@ -398,12 +432,14 @@ class SurvivorCard(QFrame):
         coords_str: str,
         color_hex: str,
         thumb_file: str,
+        is_stale: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.survivor_id = survivor_id
         self.color_hex = color_hex
         self.is_active_selected = False
+        self.is_stale = is_stale
         self.setObjectName("survivorCard")
         self.setFixedHeight(48)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -466,12 +502,14 @@ class SurvivorCard(QFrame):
         """)
         badge_box.addWidget(conf_pill)
 
-        state_pill = QLabel(status_text)
+        state_pill = QLabel("STALE" if is_stale else status_text)
         state_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        if status_text in {"STABLE", "FOUND"}:
+        if is_stale:
+            st_color, st_bg, st_border = PALETTE["amber"], PALETTE["amber_soft"], PALETTE["amber_border"]
+        elif status_text in {"STABLE", "FOUND"}:
             st_color, st_bg, st_border = PALETTE["green"], PALETTE["green_soft"], PALETTE["green_border"]
         elif status_text == "MOVING":
-            st_color, st_bg, st_border = PALETTE["amber"], PALETTE["amber_soft"], PALETTE["amber_border"]
+            st_color, st_bg, st_border = PALETTE["blue"], PALETTE["blue_soft"], PALETTE["blue_border"]
         else:
             st_color, st_bg, st_border = PALETTE["muted"], "#f1f5f9", PALETTE["line"]
 
@@ -531,6 +569,7 @@ class SurvivorCard(QFrame):
 class MapCanvas(QWidget):
     """Interactive 2D SLAM LiDAR Arena with metric grid, dynamic waypoints & sonar."""
     waypoint_added = pyqtSignal(float, float, str)
+    waypoint_selected = pyqtSignal(str, int, float, float, str)  # (type, idx, x, y, tag)
     survivor_clicked = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
@@ -541,6 +580,7 @@ class MapCanvas(QWidget):
         self.pulse_phase = 0.0
         self.scan_sweep = 0.0
         self.selected_target: Optional[str] = None
+        self.selected_waypoint: Optional[Tuple[str, int, float, float, str]] = None
         self.drone_pos = (7.0, 6.0)
         self.drone_yaw = 228.0
         self.active_survivors: List[Dict[str, Any]] = []
@@ -566,6 +606,10 @@ class MapCanvas(QWidget):
 
     def select_survivor(self, sid: str) -> None:
         self.selected_target = sid
+        self.update()
+
+    def select_waypoint(self, w_type: str, idx: int, x: float, y: float, tag: str) -> None:
+        self.selected_waypoint = (w_type, idx, x, y, tag)
         self.update()
 
     def update_drone_state(self, x: float, y: float, yaw: float) -> None:
@@ -605,6 +649,26 @@ class MapCanvas(QWidget):
             self.set_add_waypoint_mode(False)
             self.update()
             return
+
+        # Check clicks on staged waypoints
+        for idx, (wx, wy, wtag) in enumerate(self.staged_waypoints):
+            pt_x = wx / ARENA_WIDTH_M * w
+            pt_y = (1.0 - wy / ARENA_HEIGHT_M) * h
+            if math.hypot(pos.x() - pt_x, pos.y() - pt_y) < 18:
+                self.selected_waypoint = ("staged", idx, wx, wy, wtag)
+                self.waypoint_selected.emit("staged", idx, wx, wy, wtag)
+                self.update()
+                return
+
+        # Check clicks on accepted waypoints
+        for idx, (ax, ay) in enumerate(self.accepted_waypoints):
+            pt_x = ax / ARENA_WIDTH_M * w
+            pt_y = (1.0 - ay / ARENA_HEIGHT_M) * h
+            if math.hypot(pos.x() - pt_x, pos.y() - pt_y) < 18:
+                self.selected_waypoint = ("accepted", idx, ax, ay, f"WP-{idx+1}")
+                self.waypoint_selected.emit("accepted", idx, ax, ay, f"WP-{idx+1}")
+                self.update()
+                return
 
         # Check clicks on survivors
         for s in self.active_survivors:
@@ -654,7 +718,6 @@ class MapCanvas(QWidget):
             for wx, wy, wtag in self.staged_waypoints:
                 curr_pt = QPointF(wx / ARENA_WIDTH_M * w, (1.0 - wy / ARENA_HEIGHT_M) * h)
                 p.drawLine(last_pt, curr_pt)
-                # Staged pin
                 p.setPen(QPen(QColor(PALETTE["amber"]), 1.8))
                 p.setBrush(QBrush(QColor("#ffffff")))
                 p.drawEllipse(curr_pt, 6, 6)
@@ -663,7 +726,15 @@ class MapCanvas(QWidget):
                 p.drawText(QRectF(curr_pt.x() + 8, curr_pt.y() - 8, 80, 16), Qt.AlignmentFlag.AlignVCenter, f"{wtag} [STAGED]")
                 last_pt = curr_pt
 
-        # 4. Survivors & Sonar Beacons
+        # 4. Highlight Selected Waypoint
+        if self.selected_waypoint:
+            w_type, w_idx, wx, wy, wtag = self.selected_waypoint
+            sel_pt = QPointF(wx / ARENA_WIDTH_M * w, (1.0 - wy / ARENA_HEIGHT_M) * h)
+            p.setPen(QPen(QColor("#2563eb"), 2.0, Qt.PenStyle.DashLine))
+            p.setBrush(QBrush(QColor(37, 99, 235, 30)))
+            p.drawEllipse(sel_pt, 12, 12)
+
+        # 5. Survivors & Sonar Beacons
         if self.layer_survivors:
             for s in self.active_survivors:
                 sid = str(s.get("id", "S01"))
@@ -695,7 +766,7 @@ class MapCanvas(QWidget):
                     p.setBrush(QBrush(QColor(37, 99, 235, 30)))
                     p.drawEllipse(QPointF(sx, sy), beacon_r, beacon_r)
 
-        # 5. Dynamic Drone Marker & LiDAR Sweep
+        # 6. Dynamic Drone Marker & LiDAR Sweep
         if self.layer_drone:
             dx = self.drone_pos[0] / ARENA_WIDTH_M * w
             dy = (1.0 - self.drone_pos[1] / ARENA_HEIGHT_M) * h
@@ -715,26 +786,32 @@ class MapCanvas(QWidget):
             p.translate(drone_pt)
             p.rotate(self.drone_yaw)
 
-            # Quad body
             p.setPen(QPen(QColor(PALETTE["blue"]), 2.2))
             p.setBrush(QBrush(QColor("#ffffff")))
             p.drawEllipse(QPointF(0, 0), 6, 6)
 
-            # Arms
             p.drawLine(QPointF(-7, -7), QPointF(7, 7))
             p.drawLine(QPointF(-7, 7), QPointF(7, -7))
 
-            # Rotor discs
             p.setPen(QPen(QColor(PALETTE["cyan"]), 1.2))
             for rx, ry in [(-7, -7), (7, -7), (-7, 7), (7, 7)]:
                 p.drawEllipse(QPointF(rx, ry), 3, 3)
 
-            # Heading pointer nose
             p.setPen(QPen(QColor(PALETTE["danger"]), 2.2))
             p.drawLine(QPointF(0, -6), QPointF(0, -12))
             p.restore()
 
-        # 6. Waypoint placement cursor banner
+        # 7. Metric Scale Bar (Bottom Left)
+        scale_w = (3.0 / ARENA_WIDTH_M) * w
+        scale_y = h - 16
+        p.setPen(QPen(QColor(PALETTE["ink"]), 1.5))
+        p.drawLine(QPointF(14, scale_y), QPointF(14 + scale_w, scale_y))
+        p.drawLine(QPointF(14, scale_y - 3), QPointF(14, scale_y + 3))
+        p.drawLine(QPointF(14 + scale_w, scale_y - 3), QPointF(14 + scale_w, scale_y + 3))
+        p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        p.drawText(QRectF(14, scale_y - 14, scale_w, 12), Qt.AlignmentFlag.AlignCenter, "3 METERS")
+
+        # 8. Waypoint placement cursor banner
         if self.add_waypoint_mode:
             p.fillRect(QRectF(10, 10, 240, 22), QColor(37, 99, 235, 230))
             p.setPen(QColor("#ffffff"))
@@ -749,10 +826,12 @@ class MapCanvas(QWidget):
 # ==============================================================================
 class SubsystemItemWidget(QFrame):
     """Row widget for hardware component with dynamic OK/SIM/WAITING capsule."""
+    clicked = pyqtSignal(str)
 
     def __init__(self, icon_str: str, name: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("subsystemRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(8)
@@ -792,6 +871,9 @@ class SubsystemItemWidget(QFrame):
             border-radius: 9px;
             font-weight: bold;
         """)
+
+    def mousePressEvent(self, event) -> None:
+        self.clicked.emit(self.name_lbl.text())
 
 
 # ==============================================================================
@@ -880,7 +962,7 @@ class NidarRescueGCS(QMainWindow):
         self.flight_mode = "RTL / LAND"
         self.active_source = "Simulation"
         self.survivor_cards: Dict[str, SurvivorCard] = {}
-        self.last_survivor_ids: List[str] = []
+        self.last_survivor_signature: str = ""
 
         # 1. Initialize Data Plugins and WebSocket Client
         self.plugin_manager = DataPluginManager(Path("data"))
@@ -982,7 +1064,7 @@ class NidarRescueGCS(QMainWindow):
 
         row.addStretch()
 
-        # Flight Mode Pill
+        # Flight Mode Dropdown Button
         self.mode_pill = QPushButton("● RTL / LAND  ⌄")
         self.mode_pill.setObjectName("modePill")
         self.mode_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
@@ -999,7 +1081,7 @@ class NidarRescueGCS(QMainWindow):
                 background: #dcfce7;
             }}
         """)
-        self.mode_pill.clicked.connect(self.toggle_flight_mode)
+        self.mode_pill.clicked.connect(self.show_flight_mode_menu)
         row.addWidget(self.mode_pill)
 
         # Timer Pill
@@ -1292,6 +1374,7 @@ class NidarRescueGCS(QMainWindow):
         self.map_canvas = MapCanvas()
         self.map_canvas.survivor_clicked.connect(self.focus_survivor)
         self.map_canvas.waypoint_added.connect(self._on_waypoint_added)
+        self.map_canvas.waypoint_selected.connect(self._on_waypoint_selected)
         arena_layout.addWidget(self.map_canvas, 1)
 
         layout.addWidget(arena_card, 1)
@@ -1334,7 +1417,7 @@ class NidarRescueGCS(QMainWindow):
                     text-align: center;
                 }}
             """)
-            pill.clicked.connect(lambda checked=False, s=name: self.log_event(f"[SENSOR] {s} diagnostic status verified: OK."))
+            pill.clicked.connect(lambda checked=False, s=name: self._on_sensor_pill_clicked(s))
             pills_row.addWidget(pill)
             self.sensor_pills[name] = pill
 
@@ -1526,6 +1609,7 @@ class NidarRescueGCS(QMainWindow):
         ]
         for icon_str, name in units:
             w = SubsystemItemWidget(icon_str, name)
+            w.clicked.connect(self._on_subsystem_clicked)
             self.health_widgets[name] = w
             health_layout.addWidget(w)
 
@@ -1746,6 +1830,10 @@ class NidarRescueGCS(QMainWindow):
                 border: 1px solid {PALETTE['line']};
                 border-radius: 5px;
             }}
+            QFrame#subsystemRow:hover {{
+                background: #f1f5f9;
+                border-color: #cbd5e1;
+            }}
             QPushButton#modeSegment {{
                 background: #ffffff;
                 border: 1px solid {PALETTE['line']};
@@ -1913,8 +2001,14 @@ class NidarRescueGCS(QMainWindow):
         accepted_wp = frame.get("accepted_waypoints", [])
         self.map_canvas.update_waypoints(staged_wp, accepted_wp)
 
-        # 7. Camera Detections Overlay
+        # 7. Camera Detections & Consistent Telemetry Overlay
         self.camera.set_detections(survivors)
+        self.camera.set_telemetry({
+            "altitude": alt_val,
+            "speed": spd_val,
+            "heading": hdg_val,
+            "battery": bat_val,
+        })
         self.camera.is_simulated_stream = (self.active_source == "Simulation")
 
         # 8. Subsystem Health
@@ -1929,10 +2023,10 @@ class NidarRescueGCS(QMainWindow):
 
     def _sync_survivor_cards(self, survivors: List[Dict[str, Any]]) -> None:
         """Dynamically add, remove, or update survivor cards based on live events."""
-        current_ids = [str(s.get("id", "")) for s in survivors]
-        if current_ids == self.last_survivor_ids:
+        sig = repr([(s.get("id"), s.get("status"), s.get("is_stale"), s.get("confidence")) for s in survivors])
+        if sig == self.last_survivor_signature:
             return
-        self.last_survivor_ids = current_ids
+        self.last_survivor_signature = sig
 
         # Clear existing layout
         while self.survivor_layout.count():
@@ -1942,7 +2036,7 @@ class NidarRescueGCS(QMainWindow):
         self.survivor_cards.clear()
 
         if not survivors:
-            empty_lbl = QLabel("No survivors detected yet.\nScanning arena corridor...")
+            empty_lbl = QLabel("No active detections.\nSimulation scanner active...")
             empty_lbl.setFont(QFont("Segoe UI", 7))
             empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_lbl.setStyleSheet(f"color:{PALETTE['muted']}; padding:20px;")
@@ -1955,20 +2049,23 @@ class NidarRescueGCS(QMainWindow):
             grid = str(s.get("grid", "—"))
             conf = f"{s.get('confidence', 0)}%"
             status = str(s.get("status", "SEARCHING")).upper()
+            is_stale = bool(s.get("is_stale", False))
 
             lat = s.get("lat")
             lon = s.get("lon")
-            if lat is not None and lon is not None:
+            x = s.get("x")
+            y = s.get("y")
+            if x is not None and y is not None:
+                coords_str = f"ENU: {x:.1f}m, {y:.1f}m"
+            elif lat is not None and lon is not None:
                 coords_str = f"Lat: {lat:.4f}  Lon: {lon:.4f}"
             else:
-                x = s.get("x")
-                y = s.get("y")
-                coords_str = f"X: {x}m  Y: {y}m" if x is not None else "Coord: N/A"
+                coords_str = "Coord: N/A"
 
             col_hex = s.get("color_hex", "#10b981")
             thumb = s.get("thumb", "assets/thumb_s1.png")
 
-            card = SurvivorCard(sid, num, grid, conf, status, coords_str, col_hex, thumb)
+            card = SurvivorCard(sid, num, grid, conf, status, coords_str, col_hex, thumb, is_stale=is_stale)
             card.selected.connect(self.focus_survivor)
             self.survivor_cards[sid] = card
             self.survivor_layout.addWidget(card)
@@ -2073,6 +2170,25 @@ class NidarRescueGCS(QMainWindow):
                     self.plugin_manager.select(new_source)
                 self._update_comm_status("CONNECTED" if new_source == "Simulation" else "CONNECTING")
 
+    def show_flight_mode_menu(self) -> None:
+        menu = QMenu(self)
+        modes = [
+            ("● RTL / LAND (Return to Launch)", "RTL / LAND"),
+            ("● MANUAL (Direct Operator Control - Simulation)", "MANUAL"),
+            ("● AUTONOMOUS (Corridor Survey Mode - Simulation)", "AUTONOMOUS"),
+        ]
+        for title, mode_key in modes:
+            act = QAction(title, menu)
+            act.triggered.connect(lambda checked, m=mode_key: self._set_flight_mode(m))
+            menu.addAction(act)
+        menu.exec(QCursor.pos())
+
+    def _set_flight_mode(self, new_mode: str) -> None:
+        self.dispatch_command("SET_MODE", {"mode": new_mode})
+        self.flight_mode = new_mode
+        self._update_flight_mode_ui()
+        self.log_event(f"[NAV] Flight mode transitioned to {new_mode}.")
+
     def toggle_map_layers(self) -> None:
         menu = QMenu(self)
         layers = [
@@ -2081,7 +2197,7 @@ class NidarRescueGCS(QMainWindow):
             ("Accepted Flight Path", "layer_path"),
             ("Staged Waypoints", "layer_staged"),
             ("Survivor Markers", "layer_survivors"),
-            ("Sonar Rings", "layer_sonar"),
+            ("Sonar Pulse Rings", "layer_sonar"),
         ]
         for title, attr in layers:
             act = QAction(title, menu)
@@ -2089,6 +2205,16 @@ class NidarRescueGCS(QMainWindow):
             act.setChecked(getattr(self.map_canvas, attr))
             act.triggered.connect(lambda checked, a=attr: setattr(self.map_canvas, a, checked))
             menu.addAction(act)
+
+        menu.addSeparator()
+        commit_act = QAction("✔ Commit Staged Waypoints to Active Plan", menu)
+        commit_act.triggered.connect(lambda: self.dispatch_command("COMMIT_WAYPOINTS"))
+        menu.addAction(commit_act)
+
+        clear_act = QAction("✖ Clear Staged Waypoints", menu)
+        clear_act.triggered.connect(lambda: self.dispatch_command("CLEAR_WAYPOINTS"))
+        menu.addAction(clear_act)
+
         menu.exec(QCursor.pos())
 
     def _select_tab(self, name: str) -> None:
@@ -2098,7 +2224,16 @@ class NidarRescueGCS(QMainWindow):
         for btn in (self.tab_mission, self.tab_map, self.tab_surv):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-        self.log_event(f"[NAV] Switched view tab to {name}.")
+
+        if name == "Map":
+            self.log_event("[NAV] Switched view tab to Map. 2D SLAM Arena view prioritized.")
+        elif name == "Survivors":
+            self.log_event("[VISION] Switched view tab to Survivors. Focus locked on detection queue.")
+            if self.survivor_cards:
+                first_sid = list(self.survivor_cards.keys())[0]
+                self.focus_survivor(first_sid)
+        else:
+            self.log_event("[NAV] Switched view tab to Mission Dashboard overview.")
 
     def _set_cam_mode(self, mode: str) -> None:
         if self.camera.mode == mode:
@@ -2154,6 +2289,33 @@ class NidarRescueGCS(QMainWindow):
         self.dispatch_command("STAGE_WAYPOINT", {"x": metric_x, "y": metric_y, "tag": tag})
         self.log_event(f"[NAV] Local waypoint staged at metric ({metric_x}m, {metric_y}m) [{tag}].")
 
+    def _on_waypoint_selected(self, w_type: str, idx: int, x: float, y: float, tag: str) -> None:
+        self.map_canvas.select_waypoint(w_type, idx, x, y, tag)
+        self.log_event(f"[NAV] Waypoint selected: {tag} ({x:.1f}m, {y:.1f}m) [{w_type.upper()}].")
+
+    def _on_sensor_pill_clicked(self, name: str) -> None:
+        diagnostics = {
+            "LiDAR": "RPLiDAR C1 360° 12m scanner: ACTIVE. 10 Hz scan rate. No obstacle breach.",
+            "RADAR": "Optical-flow ground radar aid: NOMINAL. Ground clearance 2.40m.",
+            "VISION": "Jetson Orin AI vision inference: STANDBY (Simulation stream active; no onboard model).",
+            "WiFi": "2.4GHz / 5.8GHz telemetry link: NOMINAL. RSSI -48 dBm.",
+            "MAVLink": "MAVLink v2 protocol: HEARTBEAT ACTIVE (1 Hz). MAV_STATE_ACTIVE.",
+            "CONNECTED": "GCS primary telemetry link: NOMINAL. Packet loss 0.0%.",
+        }
+        info = diagnostics.get(name, "Status: OK.")
+        self.log_event(f"[SENSOR] {name}: {info}")
+
+    def _on_subsystem_clicked(self, name: str) -> None:
+        details = {
+            "Jetson Orin": "Edge AI Inference Host · Model: Standby (Simulated Feed) · GPU: 38% · Temp: 44°C",
+            "Jetson Gimbal / Mount": "2-Axis Brushless Gimbal · Pitch: -45° · Roll: 0° · Stabilization: ACTIVE",
+            "RPLIDAR C1": "DTOF 360° Laser Scanner · Range: 12m · Freq: 10 Hz · Obstacles: None",
+            "ROS 2 Bridge": "Micro-ROS / rclpy WebSocket Bridge · Port: 9090 · Topic Latency: 22ms",
+            "MAVLink": "MAVLink v2 Protocol · Baud: 115200 · Heartbeat: 1 Hz · State: ACTIVE",
+        }
+        info = details.get(name, "Status: OK.")
+        self.log_event(f"[SUBSYSTEM] {name}: {info}")
+
     def mark_current_survivor(self) -> None:
         dx, dy = self.map_canvas.drone_pos
         self.dispatch_command("MARK_SURVIVOR", {"x": dx, "y": dy})
@@ -2162,7 +2324,7 @@ class NidarRescueGCS(QMainWindow):
     def return_to_home(self) -> None:
         ans = QMessageBox.question(
             self, "Return to Launch (RTL)",
-            "Command Return-to-Launch (RTL)?\nThe drone will immediately pause exploration and return to home base.",
+            "Command Return-to-Launch (RTL)?\nThe drone will immediately pause exploration and return to home base (1.5m, 1.5m).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -2174,10 +2336,7 @@ class NidarRescueGCS(QMainWindow):
 
     def toggle_flight_mode(self) -> None:
         new_mode = "MANUAL" if self.flight_mode == "RTL / LAND" else "RTL / LAND"
-        self.dispatch_command("SET_MODE", {"mode": new_mode})
-        self.flight_mode = new_mode
-        self._update_flight_mode_ui()
-        self.log_event(f"[NAV] Flight mode transitioned to {self.flight_mode}.")
+        self._set_flight_mode(new_mode)
 
     def _update_flight_mode_ui(self) -> None:
         self.mode_pill.setText(f"● {self.flight_mode}  ⌄")
@@ -2219,7 +2378,7 @@ class NidarRescueGCS(QMainWindow):
     def emergency_abort(self) -> None:
         ans = QMessageBox.warning(
             self, "Emergency Abort",
-            "DECLARE EMERGENCY ABORT (RTL / LAND)?\n\nImmediate return-to-base and emergency touchdown protocol will be commanded.",
+            "DECLARE EMERGENCY ABORT (SIMULATED RTL / TOUCHDOWN)?\n\nImmediate simulated touchdown and motor kill will be executed.\n(Physical drone commands remain disabled).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -2227,7 +2386,7 @@ class NidarRescueGCS(QMainWindow):
             self.dispatch_command("ABORT")
             self.flight_mode = "EMERGENCY LAND"
             self._update_flight_mode_ui()
-            self.log_event("[ALERT] EMERGENCY ABORT CONFIRMED. Return-to-Launch initiated.")
+            self.log_event("[ALERT] SIMULATED EMERGENCY ABORT CONFIRMED. Real physical flight commands remain disabled.")
 
     def dispatch_command(self, cmd: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Route command to active source (WebSocket or Simulation plugin)."""
@@ -2269,6 +2428,11 @@ class NidarRescueGCS(QMainWindow):
             cat_c = PALETTE["purple"]
             cat_bg = PALETTE["purple_soft"]
             cat_b = PALETTE["purple_border"]
+        elif "[SENSOR]" in msg or "[SUBSYSTEM]" in msg:
+            cat = "INFO"
+            cat_c = PALETTE["cyan"]
+            cat_bg = PALETTE["blue_soft"]
+            cat_b = PALETTE["blue_border"]
 
         self._append_log_row(now_str, msg, cat, cat_c, cat_bg, cat_b)
 
@@ -2280,6 +2444,8 @@ class NidarRescueGCS(QMainWindow):
         cam = CameraSurface()
         cam.set_mode(self.camera.mode)
         cam.set_detections(self.camera.active_detections)
+        cam.set_telemetry(self.camera.telem_hud)
+        cam.is_simulated_stream = self.camera.is_simulated_stream
         v.addWidget(cam, 1)
         dialog.exec()
 
