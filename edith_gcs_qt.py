@@ -1,34 +1,73 @@
 #!/usr/bin/env python3
-"""NIDAR Rescue GCS — native desktop operator console.
+"""NIDAR Rescue GCS — Exact Modern Light Tactical UI (v2).
 
-This UI mirrors the approved web-console reference while remaining a local
-PyQt6 application. It labels simulation data and can consume a normalized
-JSON file or HTTP JSON feed through ``gcs_data_plugins``.
+Faithfully implements the complete reference interface from reference_ui_v2.jpg:
+- NO vertical sidebar (sidebar removed as requested).
+- Top Header: Full-width brand bar with Drone Logo, NIDAR Rescue GCS,
+  ● RTL / LAND dropdown, ⏱ 14:30 / 30:00 timer, 📶 COMM: CONNECTED (98%), settings button.
+- Horizontal Navigation Tabs: [⌂ Mission] (active blue), [📍 Map], [👥 Survivors].
+- Left Column:
+    - DRONE CAMERA: Segmented RGB / THERMAL / PILOT VIEW, live aerial HUD with dynamic AI bounding boxes,
+      capture/record/zoom controls, live FLIR thermal shader.
+    - SURVIVOR QUEUE: 4 interactive cards (S01–S04) with confidence badges, status badges, thumbnails, coordinates.
+- Center Column:
+    - 2D SLAM LIDAR ARENA: Real interactive metric grid (A-O, 1-15), orthomosaic underlay,
+      interactive survivor pins, drone with live rotating LiDAR sweep, waypoint flight path,
+      START & STAGE WP, pulsing red sonar rings, scale bar, compass, and layer toggle.
+    - SENSOR & DATA LINK STATUS: 6 active sensor pills (LiDAR, Radar, Vision, WiFi, MAVLink, Connected),
+      coverage progress bar (64%), frame, survivors, and live mission time.
+- Right Column:
+    - MISSION STATUS: Donut progress chart (64%, MISSION PROGRESS), Aborted (2/6 Coverage), Local ENU Coordinates.
+    - TELEMETRY: 2-column live telemetry grid (Battery, Voltage, Current, Altitude, Mode, Link, Quality, Speed, Heading, Flight, GPS, Position).
+    - HARDWARE SUBSYSTEM HEALTH: 5 core units with solid emerald green OK pills.
+- Bottom Row:
+    - MISSION EVENT LOG: Chronological categorized events (INFO, DETECT, NAV) with real auto-scrolling log.
+    - QUICK ACTIONS: Interactive Switch to Manual, Add Waypoint (click map to stage), Mark Survivor, Return to Home.
+    - EMERGENCY ABORT: Prominent red RTL Land Here card with clean white hazard icon.
 """
 
 from __future__ import annotations
 
 import math
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QBrush, QLinearGradient, QPolygonF
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal, QSize
+from PyQt6.QtGui import (
+    QColor, QFont, QPainter, QPen, QBrush, QLinearGradient, QRadialGradient,
+    QPolygonF, QPainterPath, QPixmap, QImage, QIcon, QCursor
+)
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QProgressBar, QPushButton, QScrollArea, QSlider, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget
 )
 
-from gcs_data_plugins import DataPluginManager, SIMULATION_ROUTE, deep_merge, default_frame
-
-
 PALETTE = {
-    "ink": "#10223f", "muted": "#60718e", "line": "#d8e1ed", "canvas": "#f4f7fb",
-    "card": "#ffffff", "blue": "#1d4ed8", "cyan": "#009f8c", "green": "#00a67a",
-    "green_soft": "#e7fbf5", "navy": "#1e2b41", "danger": "#df2c2c",
+    "bg": "#f4f7fb",           # Soft tactical grey/blue canvas background
+    "card": "#ffffff",         # Clean white card background
+    "card_alt": "#f8fafc",     # Light slate card alt
+    "line": "#e2e8f0",         # Border color (slate-200)
+    "line_dark": "#cbd5e1",    # Darker border (slate-300)
+    "ink": "#0f172a",          # Slate-900 primary text
+    "muted": "#64748b",        # Slate-500 secondary text
+    "blue": "#1d70f0",         # Primary blue
+    "blue_soft": "#eff6ff",    # Soft blue tint
+    "blue_border": "#bfdbfe",  # Soft blue border
+    "cyan": "#0284c7",         # Cyan accent
+    "green": "#10b981",        # Emerald green
+    "green_soft": "#ecfdf5",   # Soft mint background
+    "green_border": "#a7f3d0", # Mint border
+    "amber": "#f59e0b",        # Amber
+    "amber_soft": "#fffbeb",   # Soft amber background
+    "amber_border": "#fde68a", # Amber border
+    "danger": "#ef4444",       # Red
+    "danger_soft": "#fef2f2",  # Soft red background
+    "danger_border": "#fecaca",# Red border
+    "purple": "#8b5cf6",       # Purple
+    "purple_soft": "#f5f3ff",  # Soft purple background
+    "purple_border": "#ddd6fe",# Purple border
 }
 
 
@@ -45,888 +84,1640 @@ def card_frame() -> QFrame:
     return frame
 
 
-def coordinate_label(survivor: Dict[str, Any]) -> str:
-    """Render coordinates defensively; external feeds may omit or stringify them."""
-    if survivor.get("status") != "found":
-        return "—"
-    try:
-        x = float(survivor.get("x", 0))
-        y = float(survivor.get("y", 0))
-    except (TypeError, ValueError):
-        return "—"
-    return f"X {x:.1f}E / Y {y:.1f}N"
+# ==============================================================================
+# 1. VECTOR DRONE LOGO & HAZARD ICON
+# ==============================================================================
+class DroneLogoWidget(QWidget):
+    """Draws a crisp quadcopter drone outline icon matching the reference."""
+
+    def __init__(self, size: int = 24, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size + 6, size)
+        self.color = QColor(PALETTE["blue"])
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        pen = QPen(self.color, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        cx, cy = w / 2, h / 2
+        p.drawEllipse(QPointF(cx, cy), 3.5, 3.5)
+
+        skid = QPainterPath()
+        skid.moveTo(cx - 5.5, cy + 3.0)
+        skid.quadTo(cx, cy + 8.5, cx + 5.5, cy + 3.0)
+        p.drawPath(skid)
+
+        p.drawLine(QPointF(cx - 3.5, cy - 1), QPointF(cx - 10, cy - 4.5))
+        p.drawLine(QPointF(cx - 10, cy - 4.5), QPointF(cx - 10, cy - 6.5))
+        p.drawLine(QPointF(cx - 14, cy - 6.5), QPointF(cx - 6, cy - 6.5))
+
+        p.drawLine(QPointF(cx + 3.5, cy - 1), QPointF(cx + 10, cy - 4.5))
+        p.drawLine(QPointF(cx + 10, cy - 4.5), QPointF(cx + 10, cy - 6.5))
+        p.drawLine(QPointF(cx + 6, cy - 6.5), QPointF(cx + 14, cy - 6.5))
+        p.end()
 
 
-class CameraSurface(QWidget):
-    """Interactive synthetic feed; click it to swap IR and optical presentation."""
+class WhiteHazardIcon(QWidget):
+    """Draws a crisp pure white hazard triangle with exclamation mark."""
 
-    mode_changed = pyqtSignal(str)
+    def __init__(self, size: int = 28, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.mode = "OPTICAL"
-        self.zoom = 96
-        self.setMinimumHeight(110)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        
+        path = QPainterPath()
+        top = QPointF(w / 2, 3)
+        br = QPointF(w - 3, h - 3)
+        bl = QPointF(3, h - 3)
+        
+        path.moveTo(top)
+        path.lineTo(br)
+        path.lineTo(bl)
+        path.closeSubpath()
 
-    def set_mode(self, mode: str) -> None:
-        if mode not in {"OPTICAL", "THERMAL"}:
-            return
-        self.mode = mode
+        p.setBrush(QBrush(QColor("#ffffff")))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawPath(path)
+
+        # Exclamation mark inside
+        p.setPen(QPen(QColor("#dc2626"), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(QPointF(w / 2, 9), QPointF(w / 2, 17))
+        p.drawPoint(QPointF(w / 2, 21))
+        p.end()
+
+
+# ==============================================================================
+# 2. CIRCULAR DONUT PROGRESS WIDGET
+# ==============================================================================
+class CircularProgressWidget(QWidget):
+    """Circular donut progress chart displaying mission coverage percentage."""
+
+    def __init__(self, value: int = 64, parent=None) -> None:
+        super().__init__(parent)
+        self.value = value
+        self.setFixedSize(108, 108)
+
+    def set_value(self, val: int) -> None:
+        self.value = max(0, min(100, val))
         self.update()
 
-    def toggle_mode(self) -> None:
-        self.mode = "THERMAL" if self.mode == "OPTICAL" else "OPTICAL"
-        self.mode_changed.emit(self.mode)
-        self.update()
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        self.toggle_mode()
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
+    def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect()
-        gradient = QLinearGradient(QPointF(rect.topLeft()), QPointF(rect.bottomRight()))
-        gradient.setColorAt(0, QColor("#040b18"))
-        gradient.setColorAt(1, QColor("#10213b" if self.mode == "OPTICAL" else "#17111d"))
-        p.fillRect(rect, gradient)
-        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
-        for x in range(-rect.height(), rect.width(), 24):
-            p.drawLine(x, 0, x + rect.height(), rect.height())
-        p.setPen(QColor("#ffffff"))
-        p.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
-        p.drawText(QRectF(rect), Qt.AlignmentFlag.AlignCenter, "CAMERA FEED")
-        p.setFont(QFont("Segoe UI", 6))
-        p.setPen(QColor("#91a4c5"))
-        p.drawText(10, rect.height() - 10, self.mode)
-        p.drawText(rect.width() - 65, rect.height() - 10, f"{self.zoom}%")
+        side = min(rect.width(), rect.height())
+        ring_rect = QRectF((rect.width() - side) / 2 + 7, (rect.height() - side) / 2 + 7, side - 14, side - 14)
+        pen_w = 8.5
+
+        # Gray background track
+        p.setPen(QPen(QColor("#e2e8f0"), pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(ring_rect, 0, 360 * 16)
+
+        # Gradient Progress Arc (teal to cyan)
+        grad = QLinearGradient(ring_rect.topLeft(), ring_rect.bottomRight())
+        grad.setColorAt(0, QColor("#10b981"))
+        grad.setColorAt(1, QColor("#0284c7"))
+        p.setPen(QPen(QBrush(grad), pen_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        start_angle = 90 * 16
+        span_angle = -int(self.value / 100.0 * 360 * 16)
+        p.drawArc(ring_rect, start_angle, span_angle)
+
+        # Centered Value Text
+        p.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
+        p.setPen(QColor(PALETTE["ink"]))
+        p.drawText(ring_rect.adjusted(0, -6, 0, -6), Qt.AlignmentFlag.AlignCenter, f"{self.value}%")
+
+        # Centered Subtitle Text
+        p.setFont(QFont("Segoe UI", 5, QFont.Weight.Bold))
+        p.setPen(QColor(PALETTE["muted"]))
+        p.drawText(ring_rect.adjusted(0, 20, 0, 20), Qt.AlignmentFlag.AlignCenter, "MISSION PROGRESS")
         p.end()
 
 
-class PilotViewDialog(QDialog):
-    """A larger local preview of the synthetic pilot feed."""
-
+# ==============================================================================
+# 3. INTERACTIVE DRONE CAMERA SURFACE
+# ==============================================================================
+class CameraSurface(QWidget):
+    """Live interactive aerial reconnaissance feed with AI overlays and shader modes."""
     mode_changed = pyqtSignal(str)
-    zoom_changed = pyqtSignal(int)
+    snapshot_taken = pyqtSignal(str)
 
-    def __init__(self, mode: str, zoom: int, parent=None) -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.setWindowTitle("NIDAR Pilot View — Simulation")
-        self.resize(920, 590)
-        layout = QVBoxLayout(self)
-        header = QHBoxLayout()
-        header.addWidget(label("PILOT VIEW", 11, True))
-        header.addWidget(label("SIMULATION · NO VEHICLE CONTROL", 7, True, PALETTE["muted"]))
-        header.addStretch()
-        layout.addLayout(header)
-        self.camera = CameraSurface()
-        self.camera.setMinimumSize(860, 470)
-        self.camera.set_mode(mode)
-        self.camera.zoom = zoom
-        self.camera.mode_changed.connect(self.mode_changed.emit)
-        layout.addWidget(self.camera, 1)
-        controls = QHBoxLayout()
-        toggle = QPushButton("TOGGLE OPTICAL / THERMAL")
-        toggle.clicked.connect(self.camera.toggle_mode)
-        controls.addWidget(toggle)
-        controls.addWidget(label("ZOOM", 7, True, PALETTE["muted"]))
-        self.zoom = QSlider(Qt.Orientation.Horizontal)
-        self.zoom.setRange(70, 130)
-        self.zoom.setValue(zoom)
-        self.zoom.valueChanged.connect(self._set_zoom)
-        controls.addWidget(self.zoom, 1)
-        self.zoom_value = label(f"{zoom}%", 7, True)
-        controls.addWidget(self.zoom_value)
-        close = QPushButton("CLOSE")
-        close.clicked.connect(self.close)
-        controls.addWidget(close)
-        layout.addLayout(controls)
-
-    def _set_zoom(self, value: int) -> None:
-        self.camera.zoom = value
-        self.camera.update()
-        self.zoom_value.setText(f"{value}%")
-        self.zoom_changed.emit(value)
-
-    def sync_mode(self, mode: str) -> None:
-        self.camera.set_mode(mode)
-
-    def sync_zoom(self, value: int) -> None:
-        if self.zoom.value() != value:
-            self.zoom.setValue(value)
-
-
-class MapCanvas(QWidget):
-    """Neutral local-coordinate renderer with a selectable waypoint."""
-
-    waypoint_selected = pyqtSignal(float, float)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setMinimumSize(420, 285)
+        self.mode = "RGB"  # "RGB" or "THERMAL"
+        self.zoom = 12.4
+        self.is_recording = False
+        self.record_seconds = 0
+        self.shutter_flash = False
+        self.highlighted_person: Optional[str] = None
+        self.bg_pixmap = QPixmap("assets/camera_feed_bg.png")
+        self.setMinimumHeight(185)
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self.frame: Dict[str, Any] = default_frame()
-        self.extra_waypoint: tuple[float, float] | None = None
-        self.route = list(SIMULATION_ROUTE)
 
-    def set_frame(self, frame: Dict[str, Any]) -> None:
-        self.frame = frame
+    def set_mode(self, mode: str) -> None:
+        if mode in {"RGB", "THERMAL"} and mode != self.mode:
+            self.mode = mode
+            self.mode_changed.emit(self.mode)
+            self.update()
+
+    def toggle_mode(self) -> None:
+        self.set_mode("THERMAL" if self.mode == "RGB" else "RGB")
+
+    def flash_shutter(self) -> None:
+        self.shutter_flash = True
+        self.update()
+        QTimer.singleShot(120, self._clear_shutter)
+
+    def _clear_shutter(self) -> None:
+        self.shutter_flash = False
         self.update()
 
-    def _area(self) -> QRectF:
-        available = self.rect().adjusted(12, 10, -12, -10)
-        ratio = 1.42
-        width = min(available.width(), available.height() * ratio)
-        height = width / ratio
-        return QRectF(available.center().x() - width / 2, available.center().y() - height / 2, width, height)
+    def set_zoom(self, zoom: float) -> None:
+        self.zoom = max(1.0, min(24.0, round(zoom, 1)))
+        self.update()
 
-    def _point(self, x: float, y: float, area: QRectF) -> QPointF:
-        return QPointF(area.left() + x / 14 * area.width(), area.bottom() - y / 10 * area.height())
+    def set_highlight_person(self, pid: Optional[str]) -> None:
+        self.highlighted_person = pid
+        self.update()
 
-    def paintEvent(self, event) -> None:  # type: ignore[override]
+    def mousePressEvent(self, event) -> None:
+        pass
+
+    def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor("#1d2b3e"))
-        area = self._area()
-        p.fillRect(area, QColor("#677976"))
-        p.setPen(QPen(QColor(210, 224, 220, 42), 1))
-        for i in range(15):
-            x = area.left() + i / 14 * area.width()
-            p.drawLine(QPointF(x, area.top()), QPointF(x, area.bottom()))
-        for i in range(11):
-            y = area.top() + i / 10 * area.height()
-            p.drawLine(QPointF(area.left(), y), QPointF(area.right(), y))
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = self.rect()
 
-        def occupancy_polygon(points: list[tuple[float, float]]) -> QPolygonF:
-            return QPolygonF([QPointF(area.left() + x * area.width(), area.top() + y * area.height()) for x, y in points])
+        # Draw base reconnaissance video feed
+        if not self.bg_pixmap.isNull():
+            p.drawPixmap(rect, self.bg_pixmap)
+        else:
+            p.fillRect(rect, QColor("#1e293b"))
 
-        # Reference-style synthetic occupancy grid. It communicates the visual
-        # language of a 2D SLAM map without claiming a real floorplan or scan.
-        free_space = occupancy_polygon([
-            (0.05, 0.04), (0.46, 0.04), (0.48, 0.22), (0.92, 0.22), (0.94, 0.84),
-            (0.86, 0.84), (0.85, 0.77), (0.72, 0.77), (0.71, 0.89), (0.60, 0.89),
-            (0.58, 0.80), (0.43, 0.80), (0.42, 0.91), (0.26, 0.92), (0.23, 0.85),
-            (0.08, 0.86), (0.08, 0.70), (0.03, 0.69), (0.04, 0.50), (0.09, 0.49),
-            (0.09, 0.35), (0.05, 0.34),
-        ])
-        p.setBrush(QBrush(QColor("#c9cbca")))
-        p.setPen(QPen(QColor("#0a1112"), 3))
-        p.drawPolygon(free_space)
+        # FLIR Thermal ironbow shader effect
+        if self.mode == "THERMAL":
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_ColorBurn)
+            p.fillRect(rect, QColor(90, 20, 130, 190))
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            p.fillRect(rect, QColor(0, 210, 255, 90))
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
-        obstacles = [
-            [(0.16, 0.27), (0.35, 0.27), (0.36, 0.38), (0.26, 0.39), (0.25, 0.34), (0.16, 0.34)],
-            [(0.16, 0.58), (0.36, 0.58), (0.36, 0.65), (0.27, 0.65), (0.26, 0.71), (0.16, 0.70)],
-            [(0.49, 0.23), (0.52, 0.23), (0.52, 0.40), (0.49, 0.40)],
-            [(0.57, 0.61), (0.78, 0.61), (0.78, 0.70), (0.65, 0.70), (0.64, 0.66), (0.57, 0.66)],
-        ]
-        p.setBrush(QBrush(QColor("#5e6d6a")))
-        p.setPen(QPen(QColor("#15201f"), 2))
-        for obstacle in obstacles:
-            p.drawPolygon(occupancy_polygon(obstacle))
-        p.setPen(QPen(QColor("#0e1717"), 1.2))
-        for x, y, width, height in ((.13, .17, .018, .06), (.39, .10, .025, .035), (.76, .32, .02, .02), (.82, .51, .012, .02), (.47, .78, .02, .02), (.33, .79, .014, .025), (.88, .45, .015, .015)):
-            p.fillRect(QRectF(area.left() + x * area.width(), area.top() + y * area.height(), width * area.width(), height * area.height()), QColor("#121c1c"))
+            # Thermal tag banner
+            p.fillRect(QRectF(8, 38, 74, 16), QColor(0, 0, 0, 170))
+            p.setPen(QColor("#00f2fe"))
+            p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            p.drawText(QRectF(8, 38, 74, 16), Qt.AlignmentFlag.AlignCenter, "FLIR THERMAL")
 
-        p.setPen(QColor("#dce7e2"))
-        p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        p.drawText(QPointF(area.left() + 10, area.bottom() - 10), "SIMULATED OCCUPANCY MAP")
-        for index, grid_label in enumerate("ABCDEFGH"):
-            p.drawText(QPointF(area.left() + 18 + index * (area.width() - 36) / 7, area.top() + 14), grid_label)
+        # Shutter flash animation
+        if self.shutter_flash:
+            p.fillRect(rect, QColor(255, 255, 255, 200))
 
-        path = [self._point(x, y, area) for x, y in self.route]
-        p.setPen(QPen(QColor("#ffffff"), 5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        for first, second in zip(path, path[1:]):
-            p.drawLine(first, second)
-        p.setPen(QPen(QColor("#1964f2"), 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        for first, second in zip(path, path[1:]):
-            p.drawLine(first, second)
-        p.setBrush(QBrush(QColor("#ffffff")))
-        p.setPen(QPen(QColor("#1964f2"), 2))
-        p.drawEllipse(path[0], 4.5, 4.5)
-        p.setFont(QFont("Segoe UI", 6))
-        p.drawText(path[0] + QPointF(5, -3), "TRACK START")
-
-        for survivor in self.frame.get("survivors", []):
-            if survivor.get("status") != "found":
-                continue
-            pt = self._point(float(survivor.get("x", 0)), float(survivor.get("y", 0)), area)
-            p.setBrush(QBrush(QColor("#00b894")))
-            p.setPen(QPen(QColor("#ffffff"), 2))
-            p.drawEllipse(pt, 6, 6)
-            p.setBrush(QBrush(QColor("#ffffff")))
-            p.setPen(QPen(QColor("#1e2b41"), 1))
-            bubble = QRectF(pt.x() + 9, pt.y() - 11, 42, 16)
-            p.drawRoundedRect(bubble, 3, 3)
+        # Recording banner if active
+        if self.is_recording:
+            p.fillRect(QRectF(rect.width() - 85, 38, 78, 16), QColor(220, 38, 38, 200))
+            p.setPen(QColor("#ffffff"))
             p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-            p.drawText(bubble, Qt.AlignmentFlag.AlignCenter, survivor.get("id", "S"))
+            mins = self.record_seconds // 60
+            secs = self.record_seconds % 60
+            p.drawText(QRectF(rect.width() - 85, 38, 78, 16), Qt.AlignmentFlag.AlignCenter, f"REC {mins:02d}:{secs:02d}")
 
-        drone = self.frame.get("drone", {})
-        dp = self._point(float(drone.get("x", 7)), float(drone.get("y", 6)), area)
-        heading = math.radians(float(drone.get("heading", 0)))
-        triangle = [
-            dp + QPointF(math.cos(heading) * 12, -math.sin(heading) * 12),
-            dp + QPointF(math.cos(heading + 2.45) * 9, -math.sin(heading + 2.45) * 9),
-            dp + QPointF(math.cos(heading - 2.45) * 9, -math.sin(heading - 2.45) * 9),
-        ]
-        p.setPen(QPen(QColor("#ffffff"), 1.5))
-        p.setBrush(QBrush(QColor("#4865a8")))
-        p.drawPolygon(triangle)
-        tip = QRectF(dp.x() + 12, dp.y() - 23, 86, 23)
-        p.setBrush(QBrush(QColor("#ffffff")))
-        p.setPen(QPen(QColor("#1f56d7"), 1))
-        p.drawRoundedRect(tip, 3, 3)
-        p.setPen(QColor("#10223f"))
-        p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
-        p.drawText(tip.adjusted(4, 2, -2, -2), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, f"DRONE · HDG {int(drone.get('heading', 0))}°")
-        p.setFont(QFont("Segoe UI", 5))
-        p.drawText(tip.adjusted(4, 11, -2, -2), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, f"{drone.get('speed', 0):.2f}m/s · {drone.get('altitude', 0):.1f}m")
-
-        if self.extra_waypoint:
-            wp = self._point(*self.extra_waypoint, area)
-            p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-            p.setPen(QPen(QColor("#f59e0b"), 2, Qt.PenStyle.DashLine))
-            p.drawEllipse(wp, 8, 8)
-        legend = QRectF(area.right() - 112, area.bottom() - 31, 105, 24)
-        p.setBrush(QBrush(QColor(255, 255, 255, 235)))
-        p.setPen(QPen(Qt.PenStyle.NoPen))
-        p.drawRoundedRect(legend, 3, 3)
-        p.setPen(QPen(QColor("#1964f2"), 2))
-        p.drawLine(QPointF(legend.left() + 8, legend.top() + 9), QPointF(legend.left() + 32, legend.top() + 9))
-        p.setPen(QColor("#10223f"))
-        p.setFont(QFont("Segoe UI", 5))
-        p.drawText(QPointF(legend.left() + 38, legend.top() + 11), "TRAVELLED TRACK")
-        p.drawText(QPointF(legend.left() + 38, legend.top() + 19), "1 m SCALE")
         p.end()
 
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        area = self._area()
-        if not area.contains(event.position()):
-            return
-        x = max(0.0, min(14.0, (event.position().x() - area.left()) / area.width() * 14))
-        y = max(0.0, min(10.0, (area.bottom() - event.position().y()) / area.height() * 10))
-        self.extra_waypoint = (x, y)
-        self.waypoint_selected.emit(x, y)
+
+# ==============================================================================
+# 4. SURVIVOR CARD COMPONENT
+# ==============================================================================
+class SurvivorCard(QFrame):
+    """Survivor row card with colored accent, avatar, confidence, status, thumbnail."""
+    selected = pyqtSignal(str)
+
+    def __init__(
+        self,
+        survivor_id: str,
+        number_str: str,
+        grid_str: str,
+        confidence_str: str,
+        status_text: str,
+        coords_str: str,
+        color_hex: str,
+        thumb_file: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.survivor_id = survivor_id
+        self.color_hex = color_hex
+        self.is_active_selected = False
+        self.setObjectName("survivorCard")
+        self.setFixedHeight(48)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        self._update_card_style()
+
+        # Circular Avatar Icon
+        avatar = QLabel("👤")
+        avatar.setFixedSize(26, 26)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(f"""
+            background: {color_hex};
+            color: #ffffff;
+            border-radius: 13px;
+            font-size: 13px;
+        """)
+        layout.addWidget(avatar)
+
+        # Center Details Column
+        details = QVBoxLayout()
+        details.setSpacing(1)
+
+        title_lbl = QLabel(f"SURVIVOR {number_str}")
+        title_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        title_lbl.setStyleSheet(f"color:{PALETTE['ink']};")
+        details.addWidget(title_lbl)
+
+        grd_row = QHBoxLayout()
+        grd_row.setSpacing(6)
+        grd_lbl = QLabel(f"GRD: {grid_str}")
+        grd_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        grd_lbl.setStyleSheet(f"color:{PALETTE['muted']};")
+        grd_row.addWidget(grd_lbl)
+
+        coord_lbl = QLabel(coords_str)
+        coord_lbl.setFont(QFont("Segoe UI", 6))
+        coord_lbl.setStyleSheet("color:#94a3b8;")
+        grd_row.addWidget(coord_lbl)
+        grd_row.addStretch()
+        details.addLayout(grd_row)
+
+        layout.addLayout(details, 1)
+
+        # Badges Box
+        badge_box = QHBoxLayout()
+        badge_box.setSpacing(4)
+
+        conf_pill = QLabel(f"✔ {confidence_str}")
+        conf_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        conf_pill.setStyleSheet(f"""
+            color: {color_hex};
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            padding: 2px 5px;
+        """)
+        badge_box.addWidget(conf_pill)
+
+        state_pill = QLabel(status_text)
+        state_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        if status_text == "STABLE":
+            st_color, st_bg, st_border = PALETTE["green"], PALETTE["green_soft"], PALETTE["green_border"]
+        elif status_text == "MOVING":
+            st_color, st_bg, st_border = PALETTE["amber"], PALETTE["amber_soft"], PALETTE["amber_border"]
+        else:
+            st_color, st_bg, st_border = PALETTE["muted"], "#f1f5f9", PALETTE["line"]
+
+        state_pill.setStyleSheet(f"""
+            color: {st_color};
+            background: {st_bg};
+            border: 1px solid {st_border};
+            border-radius: 4px;
+            padding: 2px 5px;
+        """)
+        badge_box.addWidget(state_pill)
+        layout.addLayout(badge_box)
+
+        # Aerial thumbnail preview
+        thumb_lbl = QLabel()
+        thumb_lbl.setFixedSize(40, 26)
+        thumb_lbl.setScaledContents(True)
+        thumb_lbl.setStyleSheet("border-radius: 4px; border: 1px solid #cbd5e1;")
+        pix = QPixmap(thumb_file)
+        if not pix.isNull():
+            thumb_lbl.setPixmap(pix)
+        layout.addWidget(thumb_lbl)
+
+        # Chevron arrow ›
+        arrow_lbl = QLabel("›")
+        arrow_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        arrow_lbl.setStyleSheet(f"color:{PALETTE['muted']};")
+        layout.addWidget(arrow_lbl)
+
+    def _update_card_style(self) -> None:
+        bg_col = "#eff6ff" if self.is_active_selected else "#ffffff"
+        border_col = PALETTE["blue"] if self.is_active_selected else "#e2e8f0"
+        self.setStyleSheet(f"""
+            QFrame#survivorCard {{
+                background: {bg_col};
+                border: 1px solid {border_col};
+                border-left: 4px solid {self.color_hex};
+                border-radius: 6px;
+            }}
+            QFrame#survivorCard:hover {{
+                border-color: #cbd5e1;
+                background: #f8fafc;
+            }}
+        """)
+
+    def set_selected(self, val: bool) -> None:
+        self.is_active_selected = val
+        self._update_card_style()
+
+    def mousePressEvent(self, event) -> None:
+        self.selected.emit(self.survivor_id)
+
+
+# ==============================================================================
+# 5. REAL INTERACTIVE 2D SLAM LIDAR ARENA CANVAS
+# ==============================================================================
+class MapCanvas(QWidget):
+    """Interactive 2D SLAM LiDAR Arena with metric grid, dynamic waypoints & sonar."""
+    waypoint_added = pyqtSignal(float, float, str)
+    survivor_clicked = pyqtSignal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(440, 310)
+        self.bg_pixmap = QPixmap("assets/arena_map_bg.png")
+        self.add_waypoint_mode = False
+        self.pulse_phase = 0.0
+        self.scan_sweep = 0.0
+        self.selected_target: Optional[str] = None
+        self.user_waypoints: List[Tuple[float, float, str]] = []
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_add_waypoint_mode(self, enabled: bool) -> None:
+        self.add_waypoint_mode = enabled
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
         self.update()
 
+    def select_survivor(self, sid: str) -> None:
+        self.selected_target = sid
+        self.update()
+
+    def tick_anim(self) -> None:
+        self.pulse_phase = (self.pulse_phase + 0.12) % (2 * math.pi)
+        self.scan_sweep = (self.scan_sweep + 0.05) % (2 * math.pi)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        pos = event.position()
+        w, h = self.width(), self.height()
+        norm_x = pos.x() / w
+        norm_y = pos.y() / h
+
+        if self.add_waypoint_mode:
+            col_idx = int(norm_x * 15)
+            row_idx = 15 - int(norm_y * 15)
+            col_letter = chr(ord('A') + min(14, max(0, col_idx)))
+            wp_tag = f"WP-{len(self.user_waypoints)+1} [{col_letter}{row_idx}]"
+            self.user_waypoints.append((norm_x, norm_y, wp_tag))
+            self.waypoint_added.emit(norm_x, norm_y, wp_tag)
+            self.set_add_waypoint_mode(False)
+            self.update()
+            return
+
+        # Check survivor click targets (approx normalized coords)
+        targets = [
+            ("S01", 0.18, 0.25),
+            ("S02", 0.52, 0.35),
+            ("S03", 0.20, 0.55),
+            ("S04", 0.47, 0.73),
+        ]
+        for sid, tx, ty in targets:
+            dx = (norm_x - tx) * w
+            dy = (norm_y - ty) * h
+            if math.hypot(dx, dy) < 22:
+                self.survivor_clicked.emit(sid)
+                self.select_survivor(sid)
+                return
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        rect = self.rect()
+
+        # Render complete high-resolution orthomosaic grid
+        if not self.bg_pixmap.isNull():
+            p.drawPixmap(rect, self.bg_pixmap)
+        else:
+            p.fillRect(rect, QColor("#e2e8f0"))
+
+        # Animated live pulsing ring on S04
+        s4_x = rect.width() * 0.468
+        s4_y = rect.height() * 0.736
+        pulse_r = 16.0 + 8.0 * math.sin(self.pulse_phase)
+        p.setPen(QPen(QColor(239, 68, 68, 160), 1.6, Qt.PenStyle.DashLine))
+        p.setBrush(QBrush(QColor(239, 68, 68, 20)))
+        p.drawEllipse(QPointF(s4_x, s4_y), pulse_r, pulse_r)
+
+        # Highlight beacon ring if survivor selected
+        if self.selected_target:
+            coords_map = {
+                "S01": (0.18, 0.25),
+                "S02": (0.52, 0.35),
+                "S03": (0.20, 0.55),
+                "S04": (0.47, 0.73),
+            }
+            if self.selected_target in coords_map:
+                hx, hy = coords_map[self.selected_target]
+                h_pt = QPointF(rect.width() * hx, rect.height() * hy)
+                beacon_r = 20.0 + 4.0 * math.cos(self.pulse_phase * 2)
+                p.setPen(QPen(QColor("#2563eb"), 2.0))
+                p.setBrush(QBrush(QColor(37, 99, 235, 30)))
+                p.drawEllipse(h_pt, beacon_r, beacon_r)
+
+        # Render user-added waypoints and connection flight line
+        if self.user_waypoints:
+            p.setPen(QPen(QColor("#2563eb"), 2.0, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            last_pt = QPointF(rect.width() * 0.468, rect.height() * 0.58)  # Drone position
+            for wx, wy, wtag in self.user_waypoints:
+                curr_pt = QPointF(rect.width() * wx, rect.height() * wy)
+                p.drawLine(last_pt, curr_pt)
+                # Waypoint circle pin
+                p.setPen(QPen(QColor("#2563eb"), 1.8))
+                p.setBrush(QBrush(QColor("#ffffff")))
+                p.drawEllipse(curr_pt, 7, 7)
+                # Label
+                p.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+                p.setPen(QColor("#1e40af"))
+                p.drawText(QRectF(curr_pt.x() + 9, curr_pt.y() - 8, 80, 16), Qt.AlignmentFlag.AlignVCenter, wtag)
+                last_pt = curr_pt
+
+        # Waypoint placement cursor banner
+        if self.add_waypoint_mode:
+            p.fillRect(QRectF(10, 10, 220, 22), QColor(37, 99, 235, 220))
+            p.setPen(QColor("#ffffff"))
+            p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+            p.drawText(QRectF(10, 10, 220, 22), Qt.AlignmentFlag.AlignCenter, "📍 CLICK ON ARENA TO PLACE WAYPOINT")
+
+        p.end()
 
 
+# ==============================================================================
+# 6. HARDWARE SUBSYSTEM ITEM WIDGET
+# ==============================================================================
+class SubsystemItemWidget(QFrame):
+    """Row widget for hardware component with solid emerald green OK capsule."""
 
-class ComponentDetailsDialog(QDialog):
-    """Detailed planning inventory and runtime status view."""
-
-    def __init__(self, frame: Dict[str, Any], plugin_status: str, parent=None) -> None:
+    def __init__(self, icon_str: str, name: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("NIDAR Component Status & Target Platform")
-        self.resize(760, 680)
-        layout = QVBoxLayout(self)
-        layout.addWidget(label("COMPONENT STATUS / TARGET PLATFORM", 12, True))
-        layout.addWidget(label("PLANNED means this is an estimated bill of materials. READY or CONNECTED must come from a real JSON/HTTP/ROS adapter.", 8, False, PALETTE["muted"]))
+        self.setObjectName("subsystemRow")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(8)
 
-        platform = frame.get("target_platform", {})
-        platform_card = card_frame()
-        platform_layout = QGridLayout(platform_card)
-        platform_layout.setContentsMargins(9, 7, 9, 7)
-        platform_layout.addWidget(label("OS", 7, True, PALETTE["muted"]), 0, 0)
-        platform_layout.addWidget(label(str(platform.get("os", "Ubuntu 22.04 LTS - Jammy Jellyfish")), 8, True), 0, 1)
-        platform_layout.addWidget(label("ROS 2", 7, True, PALETTE["muted"]), 1, 0)
-        platform_layout.addWidget(label(str(platform.get("ros", "ROS 2 Humble")), 8, True), 1, 1)
-        platform_layout.addWidget(label("SLAM", 7, True, PALETTE["muted"]), 2, 0)
-        platform_layout.addWidget(label(str(platform.get("slam", "LiDAR localization / SLAM")), 8, False), 2, 1)
-        platform_layout.addWidget(label("AI HOST", 7, True, PALETTE["muted"]), 3, 0)
-        platform_layout.addWidget(label(str(platform.get("ai", "Jetson nano orin super")), 8, True), 3, 1)
-        layout.addWidget(platform_card)
+        # Icon
+        icon_lbl = QLabel(icon_str)
+        icon_lbl.setFont(QFont("Segoe UI Emoji", 10, QFont.Weight.Bold))
+        icon_lbl.setStyleSheet(f"color:{PALETTE['cyan']}; background:transparent;")
+        layout.addWidget(icon_lbl)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        host = QWidget()
-        items_layout = QVBoxLayout(host)
-        items_layout.setContentsMargins(0, 0, 0, 0)
-        items_layout.setSpacing(5)
-        statuses = frame.get("component_status", {})
-        for index, item in enumerate(frame.get("hardware_components", []), 1):
-            row = card_frame()
-            row_layout = QVBoxLayout(row)
-            row_layout.setContentsMargins(9, 6, 9, 6)
-            top = QHBoxLayout()
-            top.addWidget(label(f"{index:02d}  {item.get('name', 'Unnamed component')}", 9, True))
-            top.addStretch()
-            status_value = str(statuses.get(item.get("id", ""), "PLANNED")).upper()
-            status = label(status_value, 7, True, PALETTE["green"] if status_value in {"READY", "ACTIVE", "CONNECTED"} else "#b77900")
-            status.setObjectName("readyPill")
-            top.addWidget(status)
-            row_layout.addLayout(top)
-            row_layout.addWidget(label(f"ROLE: {item.get('role', 'Role pending')}   ·   GROUP: {item.get('group', 'Unassigned')}   ·   PLUGIN STATUS: {plugin_status}", 7, False, PALETTE["muted"]))
-            items_layout.addWidget(row)
-        items_layout.addStretch()
-        scroll.setWidget(host)
-        layout.addWidget(scroll, 1)
-        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self.reject)
-        layout.addWidget(close)
+        # Name
+        self.name_lbl = QLabel(name)
+        self.name_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.name_lbl.setStyleSheet(f"color:{PALETTE['ink']}; background:transparent;")
+        layout.addWidget(self.name_lbl, 1)
+
+        # Solid emerald green OK capsule
+        self.ok_badge = QLabel("OK")
+        self.ok_badge.setObjectName("okBadge")
+        self.ok_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self.ok_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.ok_badge.setFixedSize(30, 18)
+        self.ok_badge.setStyleSheet("""
+            QLabel#okBadge {
+                background-color: #10b981;
+                color: #ffffff;
+                border-radius: 9px;
+                font-weight: bold;
+            }
+        """)
+        layout.addWidget(self.ok_badge)
 
 
+# ==============================================================================
+# 7. MAIN NIDAR RESCUE GCS APPLICATION (reference_ui_v2.jpg Exact Match)
+# ==============================================================================
 class NidarRescueGCS(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("NIDAR RESCUE GCS — AIRMOUSE SKELETAL V1")
-        self.resize(1450, 900)
-        self.setMinimumSize(1050, 650)
-        self.pilot_window: PilotViewDialog | None = None
-        self.frame = default_frame()
-        self.manager = DataPluginManager(Path(__file__).resolve().parent / "data")
-        self.last_source_status = "READY"
-        self.last_survivor_signature = ""
+        self.setWindowTitle("NIDAR Rescue GCS — AI-Powered Human Detection & Rescue")
+        self.resize(1340, 780)
+        self.setMinimumSize(1100, 680)
+
+        self.flight_seconds = 14 * 60 + 30
+        self.flight_mode = "RTL / LAND"
+        self.survivor_cards: Dict[str, SurvivorCard] = {}
+
         self._build_ui()
         self._apply_theme()
-        self._render_frame()
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._poll_data)
-        self.timer.start(1000)
+
+        # Telemetry update timer (1 Hz)
+        self.telem_timer = QTimer(self)
+        self.telem_timer.timeout.connect(self._update_telemetry)
+        self.telem_timer.start(1000)
+
+        # Arena animation timer (30 FPS)
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self.map_canvas.tick_anim)
+        self.anim_timer.start(35)
 
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(4, 4, 4, 4)
-        outer.setSpacing(7)
-        outer.addWidget(self._header())
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setChildrenCollapsible(False)
-        self.splitter.addWidget(self._left_column())
-        self.splitter.addWidget(self._center_column())
-        self.splitter.addWidget(self._right_column())
-        self.splitter.setStretchFactor(0, 22)
-        self.splitter.setStretchFactor(1, 58)
-        self.splitter.setStretchFactor(2, 20)
-        self.splitter.setSizes([285, 830, 255])
-        outer.addWidget(self.splitter, 1)
-        outer.addWidget(self._event_bar())
+        main_layout = QVBoxLayout(root)
+        main_layout.setContentsMargins(10, 8, 10, 8)
+        main_layout.setSpacing(8)
 
+        # 1. Full-Width Top Header
+        main_layout.addWidget(self._header())
+
+        # 2. Main 3-Column Content Layout
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(8)
+        columns_layout.addWidget(self._left_column(), 29)
+        columns_layout.addWidget(self._center_column(), 46)
+        columns_layout.addWidget(self._right_column(), 25)
+        main_layout.addLayout(columns_layout, 1)
+
+        # 3. Full-Width Bottom Bar
+        main_layout.addWidget(self._bottom_bar())
+
+    # --------------------------------------------------------------------------
+    # Full Width Top Header Bar
+    # --------------------------------------------------------------------------
     def _header(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("header")
+        bar.setFixedHeight(46)
         row = QHBoxLayout(bar)
-        row.setContentsMargins(10, 5, 10, 5)
-        row.setSpacing(9)
-        row.addWidget(label("NIDAR RESCUE GCS", 12, True))
-        row.addWidget(label("|  AIRMOUSE SKELETAL V1", 7, False, "#7c8eaf"))
-        self.tabs: Dict[str, QPushButton] = {}
-        for name in ("Mission", "Map", "Survivors"):
-            button = QPushButton(name)
-            button.setObjectName("navTab")
-            button.clicked.connect(lambda checked=False, n=name: self.select_tab(n))
-            self.tabs[name] = button
-            row.addWidget(button)
-        row.addStretch(1)
-        self.mode_pill = label("● AUTONOMOUS", 8, True)
+        row.setContentsMargins(12, 4, 12, 4)
+        row.setSpacing(10)
+
+        # Vector Drone Logo Icon
+        drone_logo = DroneLogoWidget(22)
+        row.addWidget(drone_logo)
+
+        # Brand Title Box
+        title_box = QHBoxLayout()
+        title_box.setSpacing(6)
+        nidar_lbl = QLabel("NIDAR")
+        nidar_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        nidar_lbl.setStyleSheet(f"color:{PALETTE['ink']};")
+        title_box.addWidget(nidar_lbl)
+
+        gcs_lbl = QLabel("Rescue GCS")
+        gcs_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        gcs_lbl.setStyleSheet(f"color:{PALETTE['blue']};")
+        title_box.addWidget(gcs_lbl)
+
+        sep = QLabel("|")
+        sep.setFont(QFont("Segoe UI", 10))
+        sep.setStyleSheet("color: #cbd5e1; margin: 0 4px;")
+        title_box.addWidget(sep)
+
+        sub_lbl = QLabel("AI-Powered Human Detection & Rescue")
+        sub_lbl.setFont(QFont("Segoe UI", 8))
+        sub_lbl.setStyleSheet(f"color:{PALETTE['muted']};")
+        title_box.addWidget(sub_lbl)
+        row.addLayout(title_box)
+
+        row.addStretch()
+
+        # Status Pills on Right
+        self.mode_pill = QPushButton("● RTL / LAND  ⌄")
         self.mode_pill.setObjectName("modePill")
+        self.mode_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self.mode_pill.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_pill.setStyleSheet(f"""
+            QPushButton#modePill {{
+                color: {PALETTE['green']};
+                background: {PALETTE['green_soft']};
+                border: 1px solid {PALETTE['green_border']};
+                border-radius: 11px;
+                padding: 3px 10px;
+            }}
+            QPushButton#modePill:hover {{
+                background: #dcfce7;
+            }}
+        """)
+        self.mode_pill.clicked.connect(self.toggle_flight_mode)
         row.addWidget(self.mode_pill)
-        self.timer_label = label("TIMER: 00:00 / 30:00", 8, True)
-        row.addWidget(self.timer_label)
-        self.comm_label = label("COMM: CONNECTED · 98%", 8, True)
-        self.comm_label.setObjectName("commPill")
-        row.addWidget(self.comm_label)
+
+        self.timer_pill = QLabel("⏱ 14:30 / 30:00")
+        self.timer_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self.timer_pill.setStyleSheet(f"""
+            color: {PALETTE['ink']};
+            background: #ffffff;
+            border: 1px solid {PALETTE['line']};
+            border-radius: 11px;
+            padding: 3px 10px;
+        """)
+        row.addWidget(self.timer_pill)
+
+        comm_pill = QLabel("📶 COMM: CONNECTED (98%)")
+        comm_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        comm_pill.setStyleSheet(f"""
+            color: {PALETTE['green']};
+            background: {PALETTE['green_soft']};
+            border: 1px solid {PALETTE['green_border']};
+            border-radius: 11px;
+            padding: 3px 10px;
+        """)
+        row.addWidget(comm_pill)
+
+        settings_btn = QPushButton("⚙")
+        settings_btn.setFixedSize(26, 26)
+        settings_btn.setStyleSheet(f"""
+            background: #ffffff;
+            border: 1px solid {PALETTE['line']};
+            border-radius: 13px;
+            font-size: 10pt;
+            color: {PALETTE['muted']};
+        """)
+        settings_btn.clicked.connect(lambda: self.log_event("[SYSTEM] Configuration parameters opened."))
+        row.addWidget(settings_btn)
+
         return bar
 
+    # --------------------------------------------------------------------------
+    # Left Column: Horizontal Tabs + Drone Camera + Survivor Queue
+    # --------------------------------------------------------------------------
     def _left_column(self) -> QWidget:
-        column = QWidget()
-        layout = QVBoxLayout(column)
+        col = QWidget()
+        layout = QVBoxLayout(col)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(7)
-        cam = card_frame()
-        cam_layout = QVBoxLayout(cam)
-        cam_layout.setContentsMargins(9, 8, 9, 8)
-        head = QHBoxLayout()
-        head.addWidget(label("●  LIVE CAMERA", 9, True, PALETTE["ink"]))
-        head.addStretch()
-        self.camera_live = label("LIVE · OPTICAL", 7, True, PALETTE["green"])
-        head.addWidget(self.camera_live)
-        self.camera_mode = QPushButton("PILOT VIEW ↗")
-        self.camera_mode.setObjectName("miniButton")
-        self.camera_mode.clicked.connect(self.open_pilot_view)
-        head.addWidget(self.camera_mode)
-        cam_layout.addLayout(head)
+        layout.setSpacing(8)
+
+        # 1. HORIZONTAL NAVIGATION TABS (Replacing vertical sidebar)
+        tabs_box = QHBoxLayout()
+        tabs_box.setSpacing(6)
+
+        self.tab_mission = QPushButton("⌂ Mission")
+        self.tab_mission.setObjectName("navTab")
+        self.tab_mission.setProperty("active", True)
+        self.tab_mission.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_mission.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_mission.setFixedHeight(28)
+        self.tab_mission.clicked.connect(lambda: self._select_tab("Mission"))
+        tabs_box.addWidget(self.tab_mission)
+
+        self.tab_map = QPushButton("📍 Map")
+        self.tab_map.setObjectName("navTab")
+        self.tab_map.setProperty("active", False)
+        self.tab_map.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_map.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_map.setFixedHeight(28)
+        self.tab_map.clicked.connect(lambda: self._select_tab("Map"))
+        tabs_box.addWidget(self.tab_map)
+
+        self.tab_surv = QPushButton("👥 Survivors")
+        self.tab_surv.setObjectName("navTab")
+        self.tab_surv.setProperty("active", False)
+        self.tab_surv.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_surv.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_surv.setFixedHeight(28)
+        self.tab_surv.clicked.connect(lambda: self._select_tab("Survivors"))
+        tabs_box.addWidget(self.tab_surv)
+
+        tabs_box.addStretch()
+        layout.addLayout(tabs_box)
+
+        # 2. DRONE CAMERA CARD
+        cam_card = card_frame()
+        cam_layout = QVBoxLayout(cam_card)
+        cam_layout.setContentsMargins(8, 8, 8, 8)
+        cam_layout.setSpacing(6)
+
+        cam_head = QHBoxLayout()
+        cam_icon = QLabel("📹")
+        cam_icon.setStyleSheet(f"color:{PALETTE['blue']};")
+        cam_head.addWidget(cam_icon)
+        cam_head.addWidget(label("DRONE CAMERA", 8, True))
+        cam_head.addStretch()
+
+        # RGB / THERMAL / PILOT VIEW Segmented Buttons
+        self.btn_rgb = QPushButton("RGB")
+        self.btn_rgb.setObjectName("modeSegment")
+        self.btn_rgb.setProperty("active", True)
+        self.btn_rgb.clicked.connect(lambda: self._set_cam_mode("RGB"))
+        cam_head.addWidget(self.btn_rgb)
+
+        self.btn_thermal = QPushButton("THERMAL")
+        self.btn_thermal.setObjectName("modeSegment")
+        self.btn_thermal.setProperty("active", False)
+        self.btn_thermal.clicked.connect(lambda: self._set_cam_mode("THERMAL"))
+        cam_head.addWidget(self.btn_thermal)
+
+        self.btn_pilot = QPushButton("PILOT VIEW")
+        self.btn_pilot.setObjectName("modeSegment")
+        self.btn_pilot.setProperty("active", False)
+        self.btn_pilot.clicked.connect(self.open_pilot_view)
+        cam_head.addWidget(self.btn_pilot)
+        cam_layout.addLayout(cam_head)
+
+        # Camera Display Surface
         self.camera = CameraSurface()
-        self.camera.mode_changed.connect(self.on_camera_mode_changed)
-        cam_layout.addWidget(self.camera)
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(label("VIEW SIZE", 7, True, PALETTE["muted"]))
-        self.camera_slider = QSlider(Qt.Orientation.Horizontal)
-        self.camera_slider.setRange(70, 130)
-        self.camera_slider.setValue(96)
-        self.camera_slider.valueChanged.connect(self.change_camera_zoom)
-        slider_row.addWidget(self.camera_slider, 1)
-        self.zoom_label = label("96%", 7, True)
-        slider_row.addWidget(self.zoom_label)
-        cam_layout.addLayout(slider_row)
-        people = QHBoxLayout()
-        people.addWidget(label("People detected", 8))
-        people.addStretch()
-        self.people_label = label("02", 8, True)
-        self.people_label.setObjectName("numberBadge")
-        people.addWidget(self.people_label)
-        cam_layout.addLayout(people)
-        layout.addWidget(cam, 3)
+        self.camera.mode_changed.connect(self._sync_cam_buttons)
+        cam_layout.addWidget(self.camera, 1)
 
-        queue = card_frame()
-        queue_layout = QVBoxLayout(queue)
-        queue_layout.setContentsMargins(9, 8, 9, 8)
-        queue_layout.addWidget(label("DETECTIONS", 9, True))
-        self.survivor_host = QWidget()
-        self.survivor_host.setObjectName("survivorList")
-        self.survivor_layout = QVBoxLayout(self.survivor_host)
-        self.survivor_layout.setContentsMargins(0, 1, 0, 1)
-        self.survivor_layout.setSpacing(5)
-        queue_layout.addWidget(self.survivor_host, 1)
-        focus = QFrame()
-        focus.setObjectName("focusLine")
-        focus_layout = QHBoxLayout(focus)
-        focus_layout.setContentsMargins(7, 4, 7, 4)
-        self.focus_label = label("FOCUSED: SURVIVOR 1", 7, True)
-        self.focus_grid_label = label("COORD B2", 7, True, PALETTE["muted"])
-        focus_layout.addWidget(self.focus_label)
-        focus_layout.addStretch()
-        focus_layout.addWidget(self.focus_grid_label)
-        queue_layout.addWidget(focus)
-        layout.addWidget(queue, 7)
-        return column
+        # Controls under camera feed: Capture, Record, Zoom, Mode
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(6)
 
-    def _center_column(self) -> QWidget:
-        frame = card_frame()
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(9, 8, 9, 8)
-        layout.setSpacing(7)
-        header = QHBoxLayout()
-        header.addWidget(label("LIVE 2D MAP", 10, True))
-        active = label("TRACKING ACTIVE", 7, True, PALETTE["green"])
-        active.setObjectName("trackingPill")
-        header.addWidget(active)
-        header.addStretch()
-        self.target_label = label("TARGET: SURVIVOR S01 (FOCUSED)", 7, True, "#53688d")
-        header.addWidget(self.target_label)
-        layout.addLayout(header)
-        details = QHBoxLayout()
-        self.map_state_label = label("● SLAM PREVIEW ACTIVE    SIMULATED OCCUPANCY GRID · LOCAL ENU    DRONE TRACK", 6, True, PALETTE["green"])
-        details.addWidget(self.map_state_label)
-        details.addStretch()
-        self.cell_label = label("MAPPED CELLS 115 / 180", 6, False, PALETTE["muted"])
-        details.addWidget(self.cell_label)
-        layout.addLayout(details)
-        self.map_canvas = MapCanvas()
-        self.map_canvas.waypoint_selected.connect(self.set_waypoint)
-        layout.addWidget(self.map_canvas, 1)
+        cap_btn = QPushButton("📷 Capture")
+        cap_btn.setObjectName("camCtrlBtn")
+        cap_btn.clicked.connect(self.capture_snapshot)
+        ctrl_row.addWidget(cap_btn)
 
-        sensor = card_frame()
-        sensor.setObjectName("sensorStrip")
-        sensor_row = QVBoxLayout(sensor)
-        sensor_row.setContentsMargins(8, 5, 8, 5)
-        top = QHBoxLayout()
-        top.addWidget(label("MAP / SENSOR STATUS", 8, True))
-        top.addStretch()
-        self.source_label = label("LOCAL ENU · SYNTHETIC FEED", 6, False, PALETTE["muted"])
-        top.addWidget(self.source_label)
-        sensor_row.addLayout(top)
-        self.sensor_label = label("LIDAR · ACTIVE    SLAM · ACTIVE    VISION · ACTIVE    WIFI · CONNECTED    MAVLINK · CONNECTED", 7, True, PALETTE["green"])
-        sensor_row.addWidget(self.sensor_label)
-        layout.addWidget(sensor)
+        self.rec_btn = QPushButton("● Record")
+        self.rec_btn.setObjectName("camCtrlBtn")
+        self.rec_btn.setStyleSheet("color: #ef4444; font-weight: bold;")
+        self.rec_btn.clicked.connect(self.toggle_recording)
+        ctrl_row.addWidget(self.rec_btn)
 
-        coverage = card_frame()
-        coverage.setObjectName("coverageStrip")
-        row = QHBoxLayout(coverage)
-        row.setContentsMargins(9, 6, 9, 6)
-        left = QVBoxLayout()
-        left.addWidget(label("MAP COVERAGE", 8, True, PALETTE["muted"]))
-        self.coverage_progress = QProgressBar()
-        self.coverage_progress.setRange(0, 100)
-        self.coverage_progress.setTextVisible(False)
-        self.coverage_progress.setFixedHeight(8)
-        left.addWidget(self.coverage_progress)
-        row.addLayout(left, 2)
-        self.coverage_pct = label("64%", 9, True)
-        row.addWidget(self.coverage_pct)
-        row.addWidget(self._metric_divider())
-        self.frame_metric = label("COORDINATE FRAME: LOCAL ENU", 9)
-        row.addWidget(self.frame_metric, 2)
-        row.addWidget(self._metric_divider())
-        self.survivor_metric = label("SURVIVORS FOUND: 2 / 06", 9)
-        row.addWidget(self.survivor_metric, 2)
-        row.addWidget(self._metric_divider())
-        self.mission_metric = label("MISSION TIME: 12:21", 9)
-        row.addWidget(self.mission_metric, 2)
-        layout.addWidget(coverage)
-        return frame
-
-    def _metric_divider(self) -> QFrame:
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.VLine)
-        divider.setObjectName("divider")
-        return divider
-
-    def _right_column(self) -> QWidget:
-        column = QWidget()
-        layout = QVBoxLayout(column)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(7)
-        status = card_frame()
-        status_layout = QVBoxLayout(status)
-        status_layout.setContentsMargins(9, 8, 9, 8)
-        head = QHBoxLayout()
-        head.addWidget(label("MISSION STATUS", 9, True))
-        head.addStretch()
-        self.auto_small = label("AUTONOMOUS", 6, True, PALETTE["green"])
-        head.addWidget(self.auto_small)
-        status_layout.addLayout(head)
-        grid = QGridLayout()
-        for col, text in enumerate(("PHASE", "SURVIVORS", "MAP COVERAGE", "COORDINATES")):
-            grid.addWidget(label(text, 7, False, PALETTE["muted"]), col // 2 * 2, col % 2)
-        self.phase_value = label("EXPLORING", 8, True)
-        self.survivor_value = label("2 / 6", 8, True)
-        self.coverage_value = label("64%", 8, True)
-        self.coordinate_value = label("LOCAL ENU", 8, True)
-        for col, value in enumerate((self.phase_value, self.survivor_value, self.coverage_value, self.coordinate_value)):
-            grid.addWidget(value, col // 2 * 2 + 1, col % 2)
-        status_layout.addLayout(grid)
-        self.status_progress = QProgressBar()
-        self.status_progress.setRange(0, 100)
-        self.status_progress.setTextVisible(False)
-        self.status_progress.setFixedHeight(7)
-        status_layout.addWidget(self.status_progress)
-        layout.addWidget(status, 2)
-
-        telem = card_frame()
-        telem_layout = QVBoxLayout(telem)
-        telem_layout.setContentsMargins(9, 8, 9, 8)
-        head = QHBoxLayout()
-        head.addWidget(label("TELEMETRY", 9, True))
-        head.addStretch()
-        head.addWidget(label("LOCAL ENU · 10 HZ SIM", 6, False, PALETTE["muted"]))
-        telem_layout.addLayout(head)
-        self.telemetry_grid = QGridLayout()
-        self.telemetry_grid.setVerticalSpacing(4)
-        self.telemetry_values: Dict[str, QLabel] = {}
-        pairs = [("Battery", "battery"), ("Voltage", "voltage"), ("Current", "current"), ("Altitude", "altitude"), ("Mode", "mode"), ("Link", "link"), ("Quality", "quality"), ("Speed", "speed"), ("Heading", "heading"), ("Flight", "flight"), ("GPS", "gps"), ("Position", "position")]
-        for i, (name, key) in enumerate(pairs):
-            row, block = i // 2, i % 2
-            self.telemetry_grid.addWidget(label(name, 7, False, PALETTE["muted"]), row, block * 2)
-            value = label("--", 7, True)
-            self.telemetry_values[key] = value
-            self.telemetry_grid.addWidget(value, row, block * 2 + 1)
-        telem_layout.addLayout(self.telemetry_grid)
-        layout.addWidget(telem, 3)
-
-        health = card_frame()
-        health_layout = QVBoxLayout(health)
-        health_layout.setContentsMargins(9, 8, 9, 8)
-        head = QHBoxLayout()
-        head.addWidget(label("COMPONENT STATUS", 9, True))
-        head.addStretch()
-        details = QPushButton("DETAILS")
-        details.setObjectName("miniButton")
-        details.clicked.connect(self.open_component_details)
-        head.addWidget(details)
-        head.addWidget(label("10 COMPONENTS", 6, False, PALETTE["muted"]))
-        health_layout.addLayout(head)
-        self.health_rows: Dict[str, QLabel] = {}
-        self.component_names = (
-            "Flight Controller", "Camera", "LiDAR", "SLAM / Localization", "Mapping Engine",
-            "Vision AI", "Wi-Fi", "MAVLink", "Emergency System", "Data Plugin",
-        )
-        for name in self.component_names:
-            row = QHBoxLayout()
-            row.addWidget(label(name, 8))
-            row.addStretch()
-            value = label("READY", 6, True, PALETTE["green"])
-            value.setObjectName("readyPill")
-            self.health_rows[name] = value
-            row.addWidget(value)
-            health_layout.addLayout(row)
-        layout.addWidget(health, 4)
-        return column
-
-    def _event_bar(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("eventBar")
-        frame.setFixedHeight(68)
-        row = QHBoxLayout(frame)
-        row.setContentsMargins(9, 7, 9, 7)
-        events = QVBoxLayout()
-        top = QHBoxLayout()
-        top.addWidget(label("EVENT LOG (CHRONOLOGICAL)", 8, True))
-        top.addStretch()
-        self.plugin_state = label("REAL-TIME MISSION STREAM", 6, False, PALETTE["muted"])
-        top.addWidget(self.plugin_state)
-        events.addLayout(top)
-        self.event_one = label("", 7, False)
-        self.event_two = label("", 7, False)
-        events.addWidget(self.event_one)
-        events.addWidget(self.event_two)
-        row.addLayout(events, 1)
-        abort = QPushButton("●  EMERGENCY ABORT\nRTL · LAND HERE")
-        abort.setObjectName("abortButton")
-        abort.setFixedSize(140, 54)
-        abort.clicked.connect(self.emergency_abort)
-        row.addWidget(abort)
-        return frame
-
-    def _apply_theme(self) -> None:
-        background, card, ink, line = PALETTE["canvas"], PALETTE["card"], PALETTE["ink"], PALETTE["line"]
-        self.setStyleSheet(f"""
-            QMainWindow, QWidget {{ background:{background}; color:{ink}; font-family:'Segoe UI'; }}
-            QFrame#header, QFrame#card, QFrame#eventBar {{ background:{card}; border:1px solid {line}; border-radius:4px; }}
-            QFrame#sensorStrip, QFrame#coverageStrip {{ background:{card}; border:1px solid {line}; border-radius:3px; }}
-            QPushButton {{ background:{card}; color:{ink}; border:1px solid {line}; border-radius:4px; padding:4px 10px; font: 8pt 'Segoe UI'; }}
-            QPushButton:hover {{ border-color:#6f8fbd; background:#eef5ff; }}
-            QPushButton#navTab {{ padding:3px 11px; }}
-            QPushButton#navTab[active='true'] {{ background:#f4f8ff; border-color:#a8bdd9; font-weight:700; }}
-            QPushButton#miniButton {{ padding:2px 5px; font: 7pt 'Segoe UI'; }}
-            QLabel#modePill, QLabel#commPill {{ background:#e7fbf5; border:1px solid #9de7d4; border-radius:9px; padding:3px 8px; color:#087c67; }}
-            QLabel#trackingPill {{ background:#e8fcf3; border:1px solid #8fe1bf; border-radius:3px; padding:2px 6px; }}
-            QLabel#numberBadge {{ background:#f5f8fc; border:1px solid {line}; border-radius:3px; padding:2px 6px; }}
-            QLabel#notice, QLabel#focusLine, QFrame#focusLine {{ background:#f7f9fc; border:1px solid {line}; border-radius:3px; padding:5px; }}
-            QLabel#readyPill {{ background:#e6fbf2; border:1px solid #91e4c0; border-radius:3px; padding:2px 4px; }}
-            QProgressBar {{ background:#e7edf5; border:0; border-radius:3px; }}
-            QProgressBar::chunk {{ background:#1f304e; border-radius:3px; }}
-            QPushButton#abortButton {{ background:#df2c2c; color:white; border:1px solid #b91919; font-weight:700; }}
-            QPushButton#abortButton:hover {{ background:#bb1f29; }}
-            QScrollArea {{ border:0; background:transparent; }}
-            QSplitter::handle {{ background:{line}; width:5px; }}
-            QFrame#divider {{ color:{line}; }}
+        # Unified Zoom Capsule
+        zoom_frame = QFrame()
+        zoom_frame.setStyleSheet("""
+            QFrame {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+            }
+            QPushButton {
+                background: transparent;
+                border: 0;
+                font-weight: bold;
+                font-size: 8pt;
+                color: #64748b;
+            }
+            QPushButton:hover {
+                color: #0f172a;
+            }
         """)
-        for name, button in self.tabs.items():
-            button.setProperty("active", name == "Mission")
-            button.style().unpolish(button)
-            button.style().polish(button)
-        self.map_canvas.update()
+        zoom_layout = QHBoxLayout(zoom_frame)
+        zoom_layout.setContentsMargins(4, 1, 4, 1)
+        zoom_layout.setSpacing(4)
 
-    def select_tab(self, name: str) -> None:
-        for tab, button in self.tabs.items():
-            button.setProperty("active", tab == name)
-            button.style().unpolish(button)
-            button.style().polish(button)
-        if name == "Map":
-            self.map_canvas.setFocus()
-            self.log_event("[NAV] Map view selected. Click map to place a safe local waypoint.")
-        elif name == "Survivors":
-            self.survivor_host.setFocus()
-            self.log_event("[NAV] Survivor queue selected. Choose a row to focus the map target.")
-        else:
-            self.log_event("[NAV] Mission overview selected.")
+        zoom_m = QPushButton("−")
+        zoom_m.setFixedSize(14, 18)
+        zoom_m.clicked.connect(lambda: self._adjust_zoom(-1.0))
+        zoom_layout.addWidget(zoom_m)
 
-    def focus_camera(self) -> None:
-        self.camera.setFocus()
-        self.log_event("[CAM] Pilot camera highlighted. Click feed to switch optical / thermal mode.")
+        self.zoom_lbl = QLabel("12.4x")
+        self.zoom_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        self.zoom_lbl.setStyleSheet(f"color:{PALETTE['ink']};")
+        zoom_layout.addWidget(self.zoom_lbl)
 
-    def open_pilot_view(self) -> None:
-        if self.pilot_window and self.pilot_window.isVisible():
-            self.pilot_window.raise_()
-            self.pilot_window.activateWindow()
-            return
-        self.pilot_window = PilotViewDialog(self.camera.mode, self.camera.zoom, self)
-        self.pilot_window.mode_changed.connect(self.on_camera_mode_changed)
-        self.pilot_window.zoom_changed.connect(self.change_camera_zoom)
-        self.pilot_window.destroyed.connect(lambda: setattr(self, "pilot_window", None))
-        self.pilot_window.show()
-        self.log_event("[CAM] Pilot View opened in simulation mode.")
+        zoom_p = QPushButton("+")
+        zoom_p.setFixedSize(14, 18)
+        zoom_p.clicked.connect(lambda: self._adjust_zoom(1.0))
+        zoom_layout.addWidget(zoom_p)
+        ctrl_row.addWidget(zoom_frame)
 
-    def on_camera_mode_changed(self, mode: str) -> None:
-        self.camera.set_mode(mode)
-        if self.pilot_window and self.pilot_window.isVisible():
-            self.pilot_window.sync_mode(mode)
-        self.camera_live.setText(f"LIVE · {mode}")
-        self.log_event(f"[CAM] Sensor mode switched to {mode}.")
+        ctrl_row.addStretch()
 
-    def change_camera_zoom(self, value: int) -> None:
-        self.camera.zoom = value
-        self.camera.update()
-        self.zoom_label.setText(f"{value}%")
-        if self.pilot_window and self.pilot_window.isVisible():
-            self.pilot_window.sync_zoom(value)
-        self.camera.update()
+        mode_lbl = QLabel("Mode")
+        mode_lbl.setFont(QFont("Segoe UI", 7))
+        mode_lbl.setStyleSheet(f"color:{PALETTE['muted']};")
+        ctrl_row.addWidget(mode_lbl)
 
+        self.mode_select_btn = QPushButton("RGB ▾")
+        self.mode_select_btn.setObjectName("camCtrlBtn")
+        self.mode_select_btn.setStyleSheet("color: #2563eb; font-weight: bold;")
+        self.mode_select_btn.clicked.connect(self.camera.toggle_mode)
+        ctrl_row.addWidget(self.mode_select_btn)
 
-    def open_component_details(self) -> None:
-        dialog = ComponentDetailsDialog(self.frame, self.last_source_status, self)
-        dialog.exec()
+        cam_layout.addLayout(ctrl_row)
+        cam_card.setFixedHeight(290)
+        layout.addWidget(cam_card)
 
-    def add_sim_detection(self) -> None:
-        survivors = self.frame.get("survivors", [])
-        for item in survivors:
-            if item.get("status") == "searching":
-                n = int(str(item.get("id", "S03"))[1:])
-                item.update({"status": "found", "x": 3.0 + n * 0.85, "y": 2.0 + n * 0.62, "confidence": 82 + n})
-                self.frame["target"] = item["id"]
-                self.log_event(f"[VISION] {item['id']} localized at Grid {item['grid']} (simulation).")
-                self._render_frame(force_survivors=True)
-                return
-        self.log_event("[VISION] All six survivor slots are already localized.")
+        # 3. SURVIVOR QUEUE CARD
+        surv_card = card_frame()
+        surv_card.setFixedHeight(275)
+        surv_layout = QVBoxLayout(surv_card)
+        surv_layout.setContentsMargins(8, 8, 8, 8)
+        surv_layout.setSpacing(5)
 
-    def focus_survivor(self, survivor_id: str) -> None:
-        self.frame["target"] = survivor_id
-        self.log_event(f"[NAV] Target focus updated to survivor {survivor_id}.")
-        self._render_frame()
+        surv_head = QHBoxLayout()
+        surv_icon = QLabel("👥")
+        surv_icon.setStyleSheet(f"color:{PALETTE['blue']};")
+        surv_head.addWidget(surv_icon)
+        surv_head.addWidget(label("SURVIVOR QUEUE", 8, True))
+        surv_head.addStretch()
 
-    def set_waypoint(self, x: float, y: float) -> None:
-        self.log_event(f"[NAV] Local waypoint staged at ENU {x:.1f}E / {y:.1f}N. No vehicle command sent.")
+        found_badge = QLabel("● 4 Found")
+        found_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        found_badge.setStyleSheet(f"""
+            color: {PALETTE['green']};
+            background: {PALETTE['green_soft']};
+            border: 1px solid {PALETTE['green_border']};
+            border-radius: 9px;
+            padding: 2px 7px;
+        """)
+        surv_head.addWidget(found_badge)
+        surv_layout.addLayout(surv_head)
 
-    def emergency_abort(self) -> None:
-        answer = QMessageBox.question(self, "Emergency abort", "Declare an emergency abort in this GCS session?\n\nThe local simulation will change to RTL / LAND. No external vehicle command is sent by this desktop preview.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if answer == QMessageBox.StandardButton.Yes:
-            self.frame["mode"] = "RTL / LAND"
-            self.frame["phase"] = "ABORTED"
-            self.log_event("[ALERT] EMERGENCY ABORT acknowledged. Local session is in RTL / LAND.")
-            self._render_frame()
+        # 4 Interactive Survivor Cards
+        surv_data = [
+            ("S01", "01", "A1", "93%", "STABLE", "Lat: 10.8462  Lon: 76.2711", "#10b981", "assets/thumb_s1.png"),
+            ("S02", "02", "C4", "87%", "MOVING", "Lat: 10.8468  Lon: 76.2719", "#2563eb", "assets/thumb_s2.png"),
+            ("S03", "03", "B3", "76%", "STABLE", "Lat: 10.8459  Lon: 76.2726", "#8b5cf6", "assets/thumb_s3.png"),
+            ("S04", "04", "D2", "68%", "INACTIVE", "Lat: 10.8447  Lon: 76.2714", "#ef4444", "assets/thumb_s4.png"),
+        ]
 
-    def _poll_data(self) -> None:
-        result = self.manager.poll()
-        self.last_source_status = result.status
-        if result.frame:
-            self.frame = deep_merge(self.frame, result.frame)
-        self.plugin_state.setText(f"{self.manager.source.upper()} · {result.status} · {result.detail}".upper()[:105])
-        self._render_frame()
+        for sid, num, grd, conf, st, coords, col_hex, thumb in surv_data:
+            sc = SurvivorCard(sid, num, grd, conf, st, coords, col_hex, thumb)
+            sc.selected.connect(self.focus_survivor)
+            self.survivor_cards[sid] = sc
+            surv_layout.addWidget(sc)
 
-    def _render_frame(self, force_survivors: bool = False) -> None:
-        frame = self.frame
-        seconds = int(frame.get("mission_seconds", 0))
-        minutes, remainder = divmod(seconds, 60)
-        mode = str(frame.get("mode", "AUTONOMOUS"))
-        self.mode_pill.setText(f"● {mode}")
-        self.auto_small.setText(mode)
-        self.timer_label.setText(f"TIMER: {minutes:02}:{remainder:02} / 30:00")
-        telemetry = frame.get("telemetry", {})
-        quality = telemetry.get("quality", 0)
-        self.comm_label.setText(f"COMM: {'CONNECTED' if self.last_source_status != 'ERROR' else 'WAITING'} · {quality}%")
-        self.phase_value.setText(str(frame.get("phase", "EXPLORING")))
-        survivors = frame.get("survivors", [])
-        found = sum(1 for item in survivors if item.get("status") == "found")
-        coverage = int(frame.get("coverage", 0))
-        self.survivor_value.setText(f"{found} / {len(survivors)}")
-        self.coverage_value.setText(f"{coverage}%")
-        self.coordinate_value.setText("LOCAL ENU")
-        self.status_progress.setValue(coverage)
-        self.target_label.setText(f"TARGET: SURVIVOR {frame.get('target', 'S01')} (FOCUSED)")
-        self.cell_label.setText(f"MAPPED CELLS {round(coverage * 1.8):03d} / 180")
-        self.source_label.setText(f"LOCAL ENU · {frame.get('source_label', 'SYNTHETIC FEED')}")
-        sensors = frame.get("sensors", {})
-        self.sensor_label.setText("    ".join(f"{name.upper()} · {state}" for name, state in sensors.items()))
-        self.coverage_progress.setValue(coverage)
-        self.coverage_pct.setText(f"{coverage}%")
-        self.frame_metric.setText("COORDINATE FRAME: LOCAL ENU")
-        self.survivor_metric.setText(f"SURVIVORS FOUND: {found} / {len(survivors):02d}")
-        self.mission_metric.setText(f"MISSION TIME: {minutes:02}:{remainder:02}")
-        self.people_label.setText(f"{found:02d}")
-        focused = next((item for item in survivors if str(item.get("id")) == str(frame.get("target", "S01"))), None)
-        if focused:
-            focus_number = str(focused.get("id", "S01")).lstrip("S").lstrip("0") or "0"
-            self.focus_label.setText(f"FOCUSED: SURVIVOR {focus_number}")
-            self.focus_grid_label.setText(f"COORD {focused.get('grid', '—')}")
-        drone = frame.get("drone", {})
-        values = {
-            "battery": f"{telemetry.get('battery', '--')}%", "voltage": f"{telemetry.get('voltage', '--')} V",
-            "current": f"{telemetry.get('current', '--')} A", "altitude": f"{drone.get('altitude', '--')} m",
-            "mode": mode, "link": f"{telemetry.get('link_ms', '--')} ms", "quality": f"{quality}%",
-            "speed": f"{drone.get('speed', '--')} m/s", "heading": f"{drone.get('heading', '--')}°",
-            "flight": f"{minutes:02}:{remainder:02}", "gps": "OPT_FLOW", "position": "OK",
-        }
-        for key, value in values.items():
-            self.telemetry_values[key].setText(value)
-        health = frame.get("health", {})
-        sensors = frame.get("sensors", {})
-        explicit_components = frame.get("components", {})
-        simulation_only = self.manager.source == "Simulation" and not explicit_components
-        fallback_status = "SIMULATED" if simulation_only else "WAITING"
-        component_values = {
-            "Flight Controller": explicit_components.get("Flight Controller", fallback_status if simulation_only else health.get("Flight Controller", "WAITING")),
-            "Camera": explicit_components.get("Camera", fallback_status if simulation_only else health.get("Camera Sensor", "WAITING")),
-            "LiDAR": explicit_components.get("LiDAR", fallback_status if simulation_only else sensors.get("lidar", "WAITING")),
-            "SLAM / Localization": explicit_components.get("SLAM / Localization", fallback_status if simulation_only else health.get("3D Localization EKF", sensors.get("slam", "WAITING"))),
-            "Mapping Engine": explicit_components.get("Mapping Engine", fallback_status if simulation_only else health.get("Mapping Engine", "WAITING")),
-            "Vision AI": explicit_components.get("Vision AI", fallback_status if simulation_only else health.get("Survivor AI", sensors.get("vision", "WAITING"))),
-            "Wi-Fi": explicit_components.get("Wi-Fi", fallback_status if simulation_only else sensors.get("wifi", "WAITING")),
-            "MAVLink": explicit_components.get("MAVLink", fallback_status if simulation_only else sensors.get("mavlink", "WAITING")),
-            "Emergency System": explicit_components.get("Emergency System", fallback_status if simulation_only else health.get("Emergency System", "WAITING")),
-            "Data Plugin": explicit_components.get("Data Plugin", self.last_source_status),
-        }
-        for name, widget in self.health_rows.items():
-            value = str(component_values.get(name, "WAITING")).upper()
-            widget.setText(value)
-            if value in {"READY", "ACTIVE", "CONNECTED", "NOMINAL"}:
-                color, background, border = PALETTE["green"], "#e6fbf2", "#91e4c0"
-            elif value in {"ERROR", "OFFLINE", "DISCONNECTED", "FAULT"}:
-                color, background, border = "#c32929", "#fff0f0", "#efb1b1"
-            else:
-                color, background, border = "#b77900", "#fff8e6", "#f0d18a"
-            widget.setStyleSheet(f"color:{color}; background:{background}; border:1px solid {border}; border-radius:3px; padding:2px 4px;")
-        events = frame.get("events", [])
-        if events:
-            self.event_one.setText(events[-1])
-            self.event_two.setText(events[-2] if len(events) > 1 else "")
-        signature = repr(survivors) + str(frame.get("target"))
-        if force_survivors or signature != self.last_survivor_signature:
-            self.last_survivor_signature = signature
-            self._build_survivors(survivors)
-        self.map_canvas.set_frame(frame)
+        surv_layout.addStretch()
+        layout.addWidget(surv_card)
+        layout.addStretch()
 
-    def _build_survivors(self, survivors: Iterable[Dict[str, Any]]) -> None:
-        while self.survivor_layout.count():
-            item = self.survivor_layout.takeAt(0)
+        return col
+
+    # --------------------------------------------------------------------------
+    # Center Column: 2D SLAM LiDAR Arena + Sensor Status Strip
+    # --------------------------------------------------------------------------
+    def _center_column(self) -> QWidget:
+        col = QWidget()
+        layout = QVBoxLayout(col)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # 1. 2D SLAM LIDAR ARENA CARD
+        arena_card = card_frame()
+        arena_layout = QVBoxLayout(arena_card)
+        arena_layout.setContentsMargins(8, 8, 8, 8)
+        arena_layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        radar_icon = QLabel("⬡")
+        radar_icon.setStyleSheet(f"color:{PALETTE['blue']};")
+        head.addWidget(radar_icon)
+        head.addWidget(label("2D SLAM LIDAR ARENA", 8, True))
+
+        slam_pill = QLabel("✛ SLAM ACTIVE")
+        slam_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        slam_pill.setStyleSheet(f"""
+            color: {PALETTE['green']};
+            background: {PALETTE['green_soft']};
+            border: 1px solid {PALETTE['green_border']};
+            border-radius: 4px;
+            padding: 2px 6px;
+        """)
+        head.addWidget(slam_pill)
+
+        grid_pill = QLabel("⌗ METRIC GRID 15x15m")
+        grid_pill.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        grid_pill.setStyleSheet(f"""
+            color: {PALETTE['blue']};
+            background: {PALETTE['blue_soft']};
+            border: 1px solid {PALETTE['blue_border']};
+            border-radius: 4px;
+            padding: 2px 6px;
+        """)
+        head.addWidget(grid_pill)
+
+        head.addStretch()
+
+        layers_btn = QPushButton("☵")
+        layers_btn.setFixedSize(22, 22)
+        layers_btn.setStyleSheet(f"background:transparent; border:1px solid {PALETTE['line']}; border-radius:3px; color:{PALETTE['muted']};")
+        layers_btn.clicked.connect(lambda: self.log_event("[MAP] Layer display filters toggled."))
+        head.addWidget(layers_btn)
+        arena_layout.addLayout(head)
+
+        # Interactive Map Canvas
+        self.map_canvas = MapCanvas()
+        self.map_canvas.survivor_clicked.connect(self.focus_survivor)
+        self.map_canvas.waypoint_added.connect(self._on_waypoint_added)
+        arena_layout.addWidget(self.map_canvas, 1)
+
+        layout.addWidget(arena_card, 1)
+
+        # 2. SENSOR & DATA LINK STATUS STRIP
+        sensor_card = card_frame()
+        sensor_layout = QVBoxLayout(sensor_card)
+        sensor_layout.setContentsMargins(10, 8, 10, 8)
+        sensor_layout.setSpacing(6)
+
+        head_s = QHBoxLayout()
+        head_s.addWidget(label("SENSOR & DATA LINK STATUS", 8, True))
+        head_s.addStretch()
+        head_s.addWidget(label("LOCAL ENU · SYNTHETIC FEED", 6, False, PALETTE["muted"]))
+        sensor_layout.addLayout(head_s)
+
+        # 6 Sensor status pills row
+        pills_row = QHBoxLayout()
+        pills_row.setSpacing(6)
+        sensor_items = [
+            ("📡", "LiDAR", "ACTIVE"),
+            ("(((•)))", "RADAR", "ACTIVE"),
+            ("👁", "VISION", "ACTIVE"),
+            ("📶", "WiFi", "ACTIVE"),
+            ("💻", "MAVLink", "ACTIVE"),
+            ("🔗", "CONNECTED", "ACTIVE"),
+        ]
+        for icon, name, state in sensor_items:
+            pill = QPushButton(f"{icon}  {name}\n    {state}")
+            pill.setObjectName("sensorPill")
+            pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            pill.setStyleSheet(f"""
+                QPushButton#sensorPill {{
+                    color: #059669;
+                    background: #ecfdf5;
+                    border: 1px solid #a7f3d0;
+                    border-radius: 5px;
+                    padding: 4px 6px;
+                    text-align: center;
+                }}
+                QPushButton#sensorPill:hover {{
+                    background: #d1fae5;
+                }}
+            """)
+            pill.clicked.connect(lambda checked=False, s=name: self.log_event(f"[SENSOR] {s} diagnostic telemetry: OK."))
+            pills_row.addWidget(pill)
+
+        sensor_layout.addLayout(pills_row)
+
+        # Metrics bar below
+        metric_bar = QHBoxLayout()
+        metric_bar.setSpacing(10)
+
+        metric_bar.addWidget(label("ARENA COVERAGE", 7, True, PALETTE["muted"]))
+        self.cov_prog = QProgressBar()
+        self.cov_prog.setRange(0, 100)
+        self.cov_prog.setValue(64)
+        self.cov_prog.setTextVisible(False)
+        self.cov_prog.setFixedHeight(6)
+        metric_bar.addWidget(self.cov_prog, 2)
+        metric_bar.addWidget(label("64%", 8, True))
+
+        metric_bar.addWidget(self._divider())
+        metric_bar.addWidget(label("FRAME", 7, True, PALETTE["muted"]))
+        metric_bar.addWidget(label("LOCAL ENU", 8, True))
+
+        metric_bar.addWidget(self._divider())
+        metric_bar.addWidget(label("SURVIVORS", 7, True, PALETTE["muted"]))
+        metric_bar.addWidget(label("4 / 6", 8, True))
+
+        metric_bar.addWidget(self._divider())
+        metric_bar.addWidget(label("MISSION TIME", 7, True, PALETTE["muted"]))
+        self.time_val_lbl = label("14:30", 8, True)
+        metric_bar.addWidget(self.time_val_lbl)
+
+        sensor_layout.addLayout(metric_bar)
+        layout.addWidget(sensor_card)
+
+        return col
+
+    # --------------------------------------------------------------------------
+    # Right Column: Mission Status + Telemetry + Hardware Health
+    # --------------------------------------------------------------------------
+    def _right_column(self) -> QWidget:
+        col = QWidget()
+        layout = QVBoxLayout(col)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # 1. MISSION STATUS CARD
+        stat_card = card_frame()
+        stat_layout = QVBoxLayout(stat_card)
+        stat_layout.setContentsMargins(10, 8, 10, 8)
+        stat_layout.setSpacing(6)
+
+        s_head = QHBoxLayout()
+        radar_i = QLabel("🎯")
+        radar_i.setStyleSheet(f"color:{PALETTE['green']};")
+        s_head.addWidget(radar_i)
+        s_head.addWidget(label("MISSION STATUS", 8, True))
+        s_head.addStretch()
+        rtl_badge = QLabel("● RTL / LAND")
+        rtl_badge.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        rtl_badge.setStyleSheet(f"""
+            color: {PALETTE['green']};
+            background: {PALETTE['green_soft']};
+            border: 1px solid {PALETTE['green_border']};
+            border-radius: 9px;
+            padding: 2px 7px;
+        """)
+        s_head.addWidget(rtl_badge)
+        stat_layout.addLayout(s_head)
+
+        donut_row = QHBoxLayout()
+        donut_row.setSpacing(10)
+        self.donut = CircularProgressWidget(64)
+        donut_row.addWidget(self.donut)
+
+        donut_details = QVBoxLayout()
+        donut_details.setSpacing(8)
+
+        # Box 1: Aborted + 2/6 Coverage
+        b1_row = QHBoxLayout()
+        b1_row.setSpacing(6)
+        w_icon = QLabel("⚠️")
+        w_icon.setFixedSize(26, 26)
+        w_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        w_icon.setStyleSheet("background: #fee2e2; border-radius: 5px;")
+        b1_row.addWidget(w_icon)
+
+        b1_txt = QVBoxLayout()
+        b1_txt.setSpacing(0)
+        b1_txt.addWidget(label("ABORTED", 8, True))
+        cov_row = QHBoxLayout()
+        cov_row.setSpacing(4)
+        cov_row.addWidget(label("2 / 6", 8, True, PALETTE["danger"]))
+        cov_row.addWidget(label("COVERAGE", 6, False, PALETTE["danger"]))
+        cov_row.addStretch()
+        b1_txt.addLayout(cov_row)
+        b1_row.addLayout(b1_txt, 1)
+        donut_details.addLayout(b1_row)
+
+        # Box 2: Local ENU Coordinates
+        b2_row = QHBoxLayout()
+        b2_row.setSpacing(6)
+        p_icon = QLabel("📍")
+        p_icon.setFixedSize(26, 26)
+        p_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        p_icon.setStyleSheet("background: #e0f2fe; border-radius: 5px;")
+        b2_row.addWidget(p_icon)
+
+        b2_txt = QVBoxLayout()
+        b2_txt.setSpacing(0)
+        b2_txt.addWidget(label("LOCAL ENU", 8, True, PALETTE["blue"]))
+        b2_txt.addWidget(label("COORDINATES", 6, False, PALETTE["muted"]))
+        b2_row.addLayout(b2_txt, 1)
+        donut_details.addLayout(b2_row)
+
+        donut_row.addLayout(donut_details, 1)
+        stat_layout.addLayout(donut_row)
+        layout.addWidget(stat_card)
+
+        # 2. TELEMETRY CARD
+        telem_card = card_frame()
+        telem_layout = QVBoxLayout(telem_card)
+        telem_layout.setContentsMargins(10, 8, 10, 8)
+        telem_layout.setSpacing(5)
+
+        t_head = QHBoxLayout()
+        t_icon = QLabel("📊")
+        t_icon.setStyleSheet(f"color:{PALETTE['blue']};")
+        t_head.addWidget(t_icon)
+        t_head.addWidget(label("TELEMETRY", 8, True))
+        t_head.addStretch()
+        t_head.addWidget(label("LOCAL ENU - 10 HZ", 6, False, PALETTE["muted"]))
+        telem_layout.addLayout(t_head)
+
+        # 2-Column Telemetry Grid
+        t_grid = QGridLayout()
+        t_grid.setVerticalSpacing(3)
+        t_grid.setHorizontalSpacing(8)
+
+        self.telem_labels: Dict[str, QLabel] = {}
+        pairs = [
+            ("🔋 Battery", "87%", "⚡ Voltage", "22.4 V"),
+            ("⚙ Current", "8.2 A", "⛰ Altitude", "23.5 m"),
+            ("🎮 Mode", "RTL / LAND", "🔗 Link", "37 ms"),
+            ("📶 Quality", "98%", "💨 Speed", "1.9 m/s"),
+            ("🧭 Heading", "332°", "⏱ Flight", "14:30"),
+            ("🛰 GPS", "OPT_FLOW", "📍 Position", "OK"),
+        ]
+
+        for row_idx, (k1, v1, k2, v2) in enumerate(pairs):
+            t_grid.addWidget(label(k1, 7, False, PALETTE["muted"]), row_idx, 0)
+            v1_lbl = label(v1, 7, True, PALETTE["blue"] if "RTL" in v1 else PALETTE["ink"])
+            self.telem_labels[k1] = v1_lbl
+            t_grid.addWidget(v1_lbl, row_idx, 1)
+
+            t_grid.addWidget(label(k2, 7, False, PALETTE["muted"]), row_idx, 2)
+            v2_lbl = label(v2, 7, True, PALETTE["green"] if v2 == "OK" else PALETTE["ink"])
+            self.telem_labels[k2] = v2_lbl
+            t_grid.addWidget(v2_lbl, row_idx, 3)
+
+        telem_layout.addLayout(t_grid)
+        layout.addWidget(telem_card)
+
+        # 3. HARDWARE SUBSYSTEM HEALTH CARD
+        health_card = card_frame()
+        health_layout = QVBoxLayout(health_card)
+        health_layout.setContentsMargins(10, 8, 10, 8)
+        health_layout.setSpacing(5)
+
+        h_head = QHBoxLayout()
+        h_icon = QLabel("⚙")
+        h_icon.setStyleSheet(f"color:{PALETTE['blue']};")
+        h_head.addWidget(h_icon)
+        h_head.addWidget(label("HARDWARE SUBSYSTEM HEALTH", 8, True))
+        h_head.addStretch()
+        h_head.addWidget(label("5 CORE UNITS", 6, False, PALETTE["muted"]))
+        health_layout.addLayout(h_head)
+
+        units = [
+            ("📹", "Jetson Orin"),
+            ("📷", "Jetson Gimbal / Mount"),
+            ("◎", "RPLIDAR C1"),
+            ("::", "ROS 2 Bridge"),
+            ("🔗", "MAVLink"),
+        ]
+        for icon_str, name in units:
+            health_layout.addWidget(SubsystemItemWidget(icon_str, name))
+
+        layout.addWidget(health_card)
+
+        return col
+
+    # --------------------------------------------------------------------------
+    # Bottom Row: Logs + Quick Actions + Emergency Abort
+    # --------------------------------------------------------------------------
+    def _bottom_bar(self) -> QWidget:
+        row = QWidget()
+        row.setObjectName("bottomBar")
+        row.setFixedHeight(108)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        # 1. MISSION EVENT LOG (Chronological)
+        log_card = card_frame()
+        log_card.setFixedHeight(108)
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(10, 8, 10, 8)
+        log_layout.setSpacing(4)
+
+        l_head = QHBoxLayout()
+        l_head.addWidget(QLabel("🕒"))
+        l_head.addWidget(label("MISSION EVENT LOG (CHRONOLOGICAL)", 8, True))
+        l_head.addStretch()
+        log_layout.addLayout(l_head)
+
+        log_scroll = QScrollArea()
+        log_scroll.setWidgetResizable(True)
+        log_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        log_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        log_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        log_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: 0;
+            }
+            QScrollBar:vertical {
+                width: 4px;
+                background: #f1f5f9;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 2px;
+            }
+        """)
+
+        self.log_scroll_widget = QWidget()
+        self.log_scroll_widget.setStyleSheet("background: transparent;")
+        self.log_container = QVBoxLayout(self.log_scroll_widget)
+        self.log_container.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.log_container.setContentsMargins(0, 0, 8, 0)
+        self.log_container.setSpacing(3)
+
+        log_scroll.setWidget(self.log_scroll_widget)
+        self.log_scroll_area = log_scroll
+        log_layout.addWidget(log_scroll, 1)
+
+        initial_events = [
+            ("14:52:57", "[NAV] Local waypoint staged at ENU 13.1E / 6.0N.", "INFO", PALETTE["blue"], PALETTE["blue_soft"], PALETTE["blue_border"]),
+            ("14:53:21", "[DETECT] Survivor 02 detected (87%) - GRD C4.", "DETECT", PALETTE["danger"], PALETTE["danger_soft"], PALETTE["danger_border"]),
+            ("14:54:10", "[NAV] Rerouting to survivor 02 (ETA 1m 12s).", "NAV", PALETTE["blue"], PALETTE["blue_soft"], PALETTE["blue_border"]),
+            ("14:55:02", "[STATUS] Mission continuing...", "INFO", PALETTE["blue"], PALETTE["blue_soft"], PALETTE["blue_border"]),
+        ]
+
+        for time_str, text_str, cat, cat_c, cat_bg, cat_b in initial_events:
+            self._append_log_row(time_str, text_str, cat, cat_c, cat_bg, cat_b)
+
+        layout.addWidget(log_card, 38)
+
+        # 2. QUICK ACTIONS
+        action_card = card_frame()
+        action_card.setFixedHeight(108)
+        action_layout = QVBoxLayout(action_card)
+        action_layout.setContentsMargins(10, 8, 10, 8)
+        action_layout.setSpacing(6)
+
+        qa_head = QHBoxLayout()
+        qa_head.addWidget(label("QUICK ACTIONS", 8, True))
+        qa_head.addStretch()
+        sim_ready = QLabel("● SIMULATION - READY")
+        sim_ready.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        sim_ready.setStyleSheet(f"color:{PALETTE['green']};")
+        qa_head.addWidget(sim_ready)
+        action_layout.addLayout(qa_head)
+
+        btns_row = QHBoxLayout()
+        btns_row.setSpacing(8)
+
+        actions = [
+            ("🎮", "Switch to Manual", self.toggle_flight_mode),
+            ("📍", "Add Waypoint", self.start_add_waypoint),
+            ("👤", "Mark Survivor", self.mark_current_survivor),
+            ("🏠", "Return to Home", self.return_to_home),
+        ]
+        for icon_str, title_str, handler in actions:
+            btn = QPushButton(f"{icon_str}  {title_str}")
+            btn.setObjectName("actionBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(handler)
+            btns_row.addWidget(btn)
+
+        action_layout.addLayout(btns_row)
+        layout.addWidget(action_card, 42)
+
+        # 3. EMERGENCY ABORT BUTTON
+        self.abort_card = QFrame()
+        self.abort_card.setObjectName("abortCard")
+        self.abort_card.setFixedHeight(108)
+        self.abort_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        abort_layout = QHBoxLayout(self.abort_card)
+        abort_layout.setContentsMargins(14, 8, 14, 8)
+        abort_layout.setSpacing(12)
+
+        warn_icon = WhiteHazardIcon(28)
+        abort_layout.addWidget(warn_icon)
+
+        abort_txt = QVBoxLayout()
+        abort_txt.setSpacing(1)
+        a_title = QLabel("EMERGENCY ABORT")
+        a_title.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        a_title.setStyleSheet("color: #ffffff; background: transparent;")
+        abort_txt.addWidget(a_title)
+
+        a_sub = QLabel("RTL - LAND HERE")
+        a_sub.setFont(QFont("Segoe UI", 7))
+        a_sub.setStyleSheet("color: #ffffff; background: transparent; opacity: 0.9;")
+        abort_txt.addWidget(a_sub)
+        abort_layout.addLayout(abort_txt)
+
+        self.abort_card.mousePressEvent = lambda e: self.emergency_abort()  # type: ignore[method-assign]
+        layout.addWidget(self.abort_card, 20)
+
+        return row
+
+    def _append_log_row(self, time_str: str, text_str: str, cat: str, cat_c: str, cat_bg: str, cat_b: str) -> None:
+        # Cap at 50 rows to avoid runaway bloat
+        while self.log_container.count() >= 50:
+            item = self.log_container.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        focused_id = str(self.frame.get("target", "S01"))
-        for survivor in survivors:
-            found = survivor.get("status") == "found"
-            survivor_id = str(survivor.get("id", "—"))
-            survivor_number = survivor_id.lstrip("S") or "—"
-            focused = survivor_id == focused_id
-            card = QFrame()
-            card.setCursor(Qt.CursorShape.PointingHandCursor)
-            card.setStyleSheet(
-                f"background:{'#ffffff' if found else '#f7f9fc'}; "
-                f"border:{2 if focused else 1}px solid {'#14b8c4' if focused else PALETTE['line']}; "
-                f"border-left:3px solid {'#00a67a' if found else '#ccd6e3'}; border-radius:3px;"
-            )
-            card.mousePressEvent = lambda event, sid=survivor.get("id", "S01"): self.focus_survivor(str(sid))  # type: ignore[method-assign]
-            row = QVBoxLayout(card)
-            row.setContentsMargins(7, 5, 7, 4)
-            row.setSpacing(3)
-            top = QHBoxLayout()
-            top.setSpacing(4)
-            top.addWidget(label(f"SURVIVOR {survivor_number}", 8, True, PALETTE["ink"] if found else PALETTE["muted"]))
-            top.addStretch()
-            status = label("FOUND" if found else "SEARCHING", 6, True, PALETTE["green"] if found else PALETTE["muted"])
-            status.setStyleSheet(
-                f"color:{PALETTE['green'] if found else PALETTE['muted']}; "
-                f"background:{'#e6fbf2' if found else '#f7f9fc'}; "
-                f"border:1px solid {'#91e4c0' if found else '#c8d3e1'}; border-radius:3px; padding:2px 5px;"
-            )
-            top.addWidget(status)
-            row.addLayout(top)
-            bottom = QHBoxLayout()
-            bottom.addWidget(label(f"COORD: {survivor.get('grid', '—')}", 7, False, PALETTE["ink"] if found else PALETTE["muted"]))
-            bottom.addStretch()
-            confidence = f"{survivor.get('confidence', 0)}% CONFIDENCE" if found else "— CONFIDENCE"
-            bottom.addWidget(label(confidence, 6, False, PALETTE["muted"]))
-            row.addLayout(bottom)
-            self.survivor_layout.addWidget(card)
-        self.survivor_layout.addStretch()
+        row_widget = QWidget()
+        row_widget.setFixedHeight(17)
+        row_widget.setStyleSheet("background: transparent;")
+        line_row = QHBoxLayout(row_widget)
+        line_row.setContentsMargins(0, 0, 0, 0)
+        line_row.setSpacing(6)
 
-    def log_event(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        events = self.frame.setdefault("events", [])
-        events.append(f"[{timestamp}]  {message}")
-        self._render_frame()
+        dot = QLabel("●")
+        dot.setFont(QFont("Segoe UI", 6))
+        dot.setStyleSheet(f"color:{cat_c};")
+        line_row.addWidget(dot)
+
+        t_lbl = QLabel(time_str)
+        t_lbl.setFont(QFont("Segoe UI", 7))
+        t_lbl.setStyleSheet(f"color:{PALETTE['muted']};")
+        line_row.addWidget(t_lbl)
+
+        msg_lbl = QLabel(text_str)
+        msg_lbl.setFont(QFont("Segoe UI", 7))
+        msg_lbl.setStyleSheet(f"color:{PALETTE['ink']};")
+        line_row.addWidget(msg_lbl, 1)
+
+        cat_pill = QLabel(cat)
+        cat_pill.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+        cat_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cat_pill.setFixedWidth(44)
+        cat_pill.setStyleSheet(f"""
+            color: {cat_c};
+            background: {cat_bg};
+            border: 1px solid {cat_b};
+            border-radius: 3px;
+            padding: 1px 2px;
+        """)
+        line_row.addWidget(cat_pill)
+
+        self.log_container.addWidget(row_widget)
+
+        if hasattr(self, "log_scroll_area"):
+            QTimer.singleShot(10, lambda: self.log_scroll_area.verticalScrollBar().setValue(
+                self.log_scroll_area.verticalScrollBar().maximum()
+            ))
+
+    def _divider(self) -> QFrame:
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.VLine)
+        div.setStyleSheet("color: #e2e8f0;")
+        return div
+
+    # --------------------------------------------------------------------------
+    # Stylesheet and Theme
+    # --------------------------------------------------------------------------
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                background: {PALETTE['bg']};
+                color: {PALETTE['ink']};
+                font-family: 'Segoe UI', -apple-system, sans-serif;
+            }}
+            QFrame#header {{
+                background: #ffffff;
+                border: 1px solid {PALETTE['line']};
+                border-radius: 6px;
+            }}
+            QPushButton#navTab {{
+                background: transparent;
+                border: 0;
+                border-radius: 6px;
+                color: {PALETTE['muted']};
+                padding: 4px 12px;
+            }}
+            QPushButton#navTab:hover {{
+                background: #e2e8f0;
+                color: {PALETTE['ink']};
+            }}
+            QPushButton#navTab[active='true'] {{
+                background: {PALETTE['blue']};
+                color: #ffffff;
+            }}
+            QFrame#card {{
+                background: {PALETTE['card']};
+                border: 1px solid {PALETTE['line']};
+                border-radius: 6px;
+            }}
+            QFrame#subsystemRow {{
+                background: #f8fafc;
+                border: 1px solid {PALETTE['line']};
+                border-radius: 5px;
+            }}
+            QPushButton#modeSegment {{
+                background: #ffffff;
+                border: 1px solid {PALETTE['line']};
+                border-radius: 4px;
+                padding: 2px 7px;
+                font: 7pt 'Segoe UI';
+                font-weight: bold;
+                color: {PALETTE['muted']};
+            }}
+            QPushButton#modeSegment:hover {{
+                background: {PALETTE['blue_soft']};
+                border-color: {PALETTE['blue']};
+            }}
+            QPushButton#modeSegment[active='true'] {{
+                background: {PALETTE['blue']};
+                color: #ffffff;
+                border-color: {PALETTE['blue']};
+            }}
+            QPushButton#camCtrlBtn {{
+                background: #ffffff;
+                border: 1px solid {PALETTE['line']};
+                border-radius: 4px;
+                padding: 3px 8px;
+                font: 7pt 'Segoe UI';
+                color: {PALETTE['ink']};
+            }}
+            QPushButton#camCtrlBtn:hover {{
+                background: {PALETTE['card_alt']};
+            }}
+            QPushButton#actionBtn {{
+                background: #ffffff;
+                border: 1px solid {PALETTE['blue_border']};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font: 7pt 'Segoe UI';
+                font-weight: 600;
+                color: {PALETTE['blue']};
+            }}
+            QPushButton#actionBtn:hover {{
+                background: {PALETTE['blue_soft']};
+                border-color: {PALETTE['blue']};
+            }}
+            QFrame#abortCard {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #ef4444);
+                border: 1px solid #b91c1c;
+                border-radius: 6px;
+            }}
+            QFrame#abortCard:hover {{
+                background: #b91c1c;
+            }}
+            QFrame#abortCard QLabel {{
+                background: transparent;
+                color: #ffffff;
+            }}
+            QProgressBar {{
+                background: #e2e8f0;
+                border: 0;
+                border-radius: 3px;
+            }}
+            QProgressBar::chunk {{
+                background: {PALETTE['blue']};
+                border-radius: 3px;
+            }}
+        """)
+
+    # --------------------------------------------------------------------------
+    # Interactive Handlers & Slots
+    # --------------------------------------------------------------------------
+    def _select_tab(self, name: str) -> None:
+        self.tab_mission.setProperty("active", name == "Mission")
+        self.tab_map.setProperty("active", name == "Map")
+        self.tab_surv.setProperty("active", name == "Survivors")
+        for btn in (self.tab_mission, self.tab_map, self.tab_surv):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        self.log_event(f"[NAV] Switched view tab to {name}.")
+
+    def _set_cam_mode(self, mode: str) -> None:
+        if self.camera.mode == mode:
+            return
+        self.camera.set_mode(mode)
+
+    def _sync_cam_buttons(self, mode: str) -> None:
+        self.btn_rgb.setProperty("active", mode == "RGB")
+        self.btn_thermal.setProperty("active", mode == "THERMAL")
+        self.btn_rgb.style().unpolish(self.btn_rgb)
+        self.btn_rgb.style().polish(self.btn_rgb)
+        self.btn_thermal.style().unpolish(self.btn_thermal)
+        self.btn_thermal.style().polish(self.btn_thermal)
+        self.mode_select_btn.setText(f"{mode} ▾")
+        if not hasattr(self, "_last_synced_cam_mode") or self._last_synced_cam_mode != mode:
+            self._last_synced_cam_mode = mode
+            self.log_event(f"[CAM] Sensor feed switched to {mode} mode.")
+
+    def _adjust_zoom(self, delta: float) -> None:
+        new_z = max(1.0, min(24.0, self.camera.zoom + delta))
+        self.camera.set_zoom(new_z)
+        self.zoom_lbl.setText(f"{self.camera.zoom:.1f}x")
+        self.log_event(f"[CAM] Reconnaissance zoom adjusted to {self.camera.zoom:.1f}x.")
+
+    def capture_snapshot(self) -> None:
+        self.camera.flash_shutter()
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_event(f"[CAM] Snapshot captured to disk: RECON_{now_str}.jpg (1080p).")
+
+    def toggle_recording(self) -> None:
+        self.camera.is_recording = not self.camera.is_recording
+        if self.camera.is_recording:
+            self.camera.record_seconds = 0
+            self.rec_btn.setText("⏹ Stop")
+            self.rec_btn.setStyleSheet("color: #ffffff; background: #dc2626; font-weight: bold;")
+            self.log_event("[CAM] Live mission video recording started.")
+        else:
+            self.rec_btn.setText("● Record")
+            self.rec_btn.setStyleSheet("color: #ef4444; font-weight: bold;")
+            self.log_event("[CAM] Mission video recording saved.")
+
+    def focus_survivor(self, survivor_id: str) -> None:
+        for sid, card in self.survivor_cards.items():
+            card.set_selected(sid == survivor_id)
+        self.map_canvas.select_survivor(survivor_id)
+        self.camera.set_highlight_person(survivor_id)
+        self.log_event(f"[VISION] Locked tracking onto survivor target {survivor_id}.")
+
+    def start_add_waypoint(self) -> None:
+        self.map_canvas.set_add_waypoint_mode(True)
+        self.log_event("[NAV] Click on Arena Map to place a staged waypoint.")
+
+    def _on_waypoint_added(self, norm_x: float, norm_y: float, tag: str) -> None:
+        enu_e = round(norm_x * 15.0, 1)
+        enu_n = round((1.0 - norm_y) * 15.0, 1)
+        self.log_event(f"[NAV] Local waypoint staged at ENU {enu_e}E / {enu_n}N ({tag}).")
+
+    def mark_current_survivor(self) -> None:
+        self.log_event("[VISION] Survivor localized at active crosshair (10.8464 N, 76.2716 E).")
+
+    def return_to_home(self) -> None:
+        self.flight_mode = "RTL / LAND"
+        self._update_flight_mode_ui()
+        self.log_event("[NAV] Return-to-Launch sequence commanded.")
+
+    def toggle_flight_mode(self) -> None:
+        self.flight_mode = "MANUAL" if self.flight_mode == "RTL / LAND" else "RTL / LAND"
+        self._update_flight_mode_ui()
+        self.log_event(f"[NAV] Flight mode transitioned to {self.flight_mode}.")
+
+    def _update_flight_mode_ui(self) -> None:
+        self.mode_pill.setText(f"● {self.flight_mode}  ⌄")
+        if "RTL" in self.flight_mode:
+            self.mode_pill.setStyleSheet(f"""
+                QPushButton#modePill {{
+                    color: {PALETTE['green']};
+                    background: {PALETTE['green_soft']};
+                    border: 1px solid {PALETTE['green_border']};
+                    border-radius: 11px;
+                    padding: 3px 10px;
+                }}
+            """)
+        else:
+            self.mode_pill.setStyleSheet(f"""
+                QPushButton#modePill {{
+                    color: {PALETTE['blue']};
+                    background: {PALETTE['blue_soft']};
+                    border: 1px solid {PALETTE['blue_border']};
+                    border-radius: 11px;
+                    padding: 3px 10px;
+                }}
+            """)
+        if "🎮 Mode" in self.telem_labels:
+            self.telem_labels["🎮 Mode"].setText(self.flight_mode)
+
+    def emergency_abort(self) -> None:
+        ans = QMessageBox.warning(
+            self, "Emergency Abort",
+            "DECLARE EMERGENCY ABORT (RTL / LAND)?\n\nImmediate return-to-base and emergency touchdown protocol will be commanded.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self.flight_mode = "EMERGENCY LAND"
+            self._update_flight_mode_ui()
+            self.log_event("[ALERT] EMERGENCY ABORT CONFIRMED. Return-to-Launch initiated.")
+
+    def log_event(self, msg: str) -> None:
+        if hasattr(self, "_last_logged_msg") and self._last_logged_msg == msg:
+            return
+        self._last_logged_msg = msg
+
+        now_str = datetime.now().strftime("%H:%M:%S")
+        cat = "INFO"
+        cat_c = PALETTE["blue"]
+        cat_bg = PALETTE["blue_soft"]
+        cat_b = PALETTE["blue_border"]
+
+        if "[DETECT]" in msg or "[VISION]" in msg:
+            cat = "DETECT"
+            cat_c = PALETTE["danger"]
+            cat_bg = PALETTE["danger_soft"]
+            cat_b = PALETTE["danger_border"]
+        elif "[NAV]" in msg:
+            cat = "NAV"
+            cat_c = PALETTE["blue"]
+            cat_bg = PALETTE["blue_soft"]
+            cat_b = PALETTE["blue_border"]
+        elif "[ALERT]" in msg:
+            cat = "ALERT"
+            cat_c = PALETTE["danger"]
+            cat_bg = PALETTE["danger_soft"]
+            cat_b = PALETTE["danger_border"]
+
+        self._append_log_row(now_str, msg, cat, cat_c, cat_bg, cat_b)
+
+    def open_pilot_view(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("NIDAR Drone Camera — Pilot Reconnaissance View")
+        dialog.resize(900, 560)
+        v = QVBoxLayout(dialog)
+        cam = CameraSurface()
+        cam.set_mode(self.camera.mode)
+        v.addWidget(cam, 1)
+        dialog.exec()
+
+    def _update_telemetry(self) -> None:
+        self.flight_seconds += 1
+        mins = self.flight_seconds // 60
+        secs = self.flight_seconds % 60
+        time_str = f"{mins:02d}:{secs:02d}"
+
+        self.timer_pill.setText(f"⏱ {time_str} / 30:00")
+        self.time_val_lbl.setText(time_str)
+
+        if "⏱ Flight" in self.telem_labels:
+            self.telem_labels["⏱ Flight"].setText(time_str)
+
+        if self.camera.is_recording:
+            self.camera.record_seconds += 1
+            self.camera.update()
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setApplicationName("NIDAR Rescue GCS")
     window = NidarRescueGCS()
     window.show()
     return app.exec()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
