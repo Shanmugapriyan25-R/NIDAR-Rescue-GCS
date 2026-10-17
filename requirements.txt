@@ -1,1 +1,10 @@
+# Core GCS Desktop Dependencies (Python 3.11 Windows Compatible)
 PyQt6>=6.6
+websockets>=12.0
+numpy>=1.24.0
+
+# Testing & Quality
+pytest>=8.0.0
+
+# Optional Dependencies (ROS 2 / Hardware bridges):
+# - rclpy (available on Linux / ROS 2 environments only; safely guarded on Windows)

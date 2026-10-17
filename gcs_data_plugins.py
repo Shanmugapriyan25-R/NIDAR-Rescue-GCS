@@ -1,9 +1,14 @@
-"""Small, dependency-free mission data adapters for NIDAR Rescue GCS.
+"""TEAM EDITH — NIDAR Rescue GCS Data Plugins & Simulation Engine.
 
-The desktop client always has a deterministic Simulation source.  Operators can
-switch to a JSON file (ideal for ROS/PX4 bridge output) or an HTTP JSON endpoint
-without changing the UI.  Every external payload is merged into the safe local
-schema, so an unavailable source never crashes the GCS.
+Provides unified data adapters and a deterministic, hardware-free simulation engine.
+Operators can select between:
+- "Simulation": Full hardware-free deterministic simulation of drone kinematics,
+  telemetry, sensor health, and sequential survivor detection events.
+- "JSON file": Watches a mission file (e.g. data/mission.json).
+- "WebSocket": Connects to the ROS 2 or simulation bridge via WebSocket.
+
+All sources produce normalized, schema-validated frames so the UI remains stable
+regardless of connection state or data loss.
 """
 
 from __future__ import annotations
@@ -15,95 +20,155 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
-DEFAULT_SURVIVORS = [
-    {"id": "S01", "status": "found", "grid": "B2", "x": 5.2, "y": 4.2, "confidence": 92, "movement": "MOVEMENT DETECTED", "detected_at": "08:14"},
-    {"id": "S02", "status": "found", "grid": "C4", "x": 8.2, "y": 6.3, "confidence": 85, "movement": "STATIONARY (THERMAL)", "detected_at": "08:29"},
-    {"id": "S03", "status": "searching", "grid": "A3", "x": 0.0, "y": 0.0, "confidence": 0, "movement": "SEARCH PENDING", "detected_at": "--:--"},
-    {"id": "S04", "status": "searching", "grid": "D2", "x": 0.0, "y": 0.0, "confidence": 0, "movement": "SEARCH PENDING", "detected_at": "--:--"},
-    {"id": "S05", "status": "searching", "grid": "D4", "x": 0.0, "y": 0.0, "confidence": 0, "movement": "SEARCH PENDING", "detected_at": "--:--"},
-    {"id": "S06", "status": "searching", "grid": "E1", "x": 0.0, "y": 0.0, "confidence": 0, "movement": "SEARCH PENDING", "detected_at": "--:--"},
+# Arena dimension: 15m x 15m metric indoor/outdoor disaster zone
+ARENA_WIDTH_M = 15.0
+ARENA_HEIGHT_M = 15.0
+
+# 15x15 Metric Grid labels (A-O, 1-15)
+GRID_COLS = [chr(ord('A') + i) for i in range(15)]
+GRID_ROWS = [str(15 - i) for i in range(15)]
+
+# Canonical simulation survivor candidates
+SIM_SURVIVORS_MASTER = [
+    {
+        "id": "S01",
+        "number": "01",
+        "grid": "A1",
+        "x": 2.7,
+        "y": 3.75,
+        "lat": 10.8462,
+        "lon": 76.2711,
+        "confidence": 93,
+        "status": "STABLE",
+        "movement": "STABLE",
+        "bbox": [0.15, 0.20, 0.26, 0.36],
+        "thumb": "assets/thumb_s1.png",
+        "color_hex": "#10b981",
+        "discover_sec": 0,
+    },
+    {
+        "id": "S02",
+        "number": "02",
+        "grid": "C4",
+        "x": 7.8,
+        "y": 5.25,
+        "lat": 10.8468,
+        "lon": 76.2719,
+        "confidence": 87,
+        "status": "MOVING",
+        "movement": "MOVING",
+        "bbox": [0.46, 0.32, 0.58, 0.49],
+        "thumb": "assets/thumb_s2.png",
+        "color_hex": "#2563eb",
+        "discover_sec": 12,
+    },
+    {
+        "id": "S03",
+        "number": "03",
+        "grid": "B3",
+        "x": 3.0,
+        "y": 8.25,
+        "lat": 10.8459,
+        "lon": 76.2726,
+        "confidence": 76,
+        "status": "STABLE",
+        "movement": "STABLE",
+        "bbox": [0.18, 0.52, 0.29, 0.68],
+        "thumb": "assets/thumb_s3.png",
+        "color_hex": "#8b5cf6",
+        "discover_sec": 24,
+    },
+    {
+        "id": "S04",
+        "number": "04",
+        "grid": "D2",
+        "x": 7.0,
+        "y": 11.0,
+        "lat": 10.8447,
+        "lon": 76.2714,
+        "confidence": 68,
+        "status": "INACTIVE",
+        "movement": "INACTIVE",
+        "bbox": [0.42, 0.70, 0.54, 0.86],
+        "thumb": "assets/thumb_s4.png",
+        "color_hex": "#ef4444",
+        "discover_sec": 38,
+    },
 ]
 
-
-# Local ENU route used only by the deterministic desktop simulation.  It is not
-# a flight path or a command sent to an aircraft.
-SIMULATION_ROUTE = [
-    (10.8, 8.1), (10.3, 7.2), (9.4, 6.4), (8.1, 5.6), (7.3, 4.9),
-    (7.1, 3.6), (7.2, 2.3), (8.5, 1.6), (10.1, 1.5), (10.8, 2.1),
+# Standard waypoint patrol route (metric coordinates in meters inside 15x15m arena)
+PATROL_WAYPOINTS = [
+    (1.5, 1.5), (1.5, 4.5), (3.5, 4.5), (3.5, 2.0),
+    (7.0, 2.0), (7.0, 5.0), (11.0, 5.0), (11.0, 9.0),
+    (7.0, 9.0), (7.0, 12.0), (3.5, 12.0), (1.5, 13.5),
+    (7.0, 7.5), (13.5, 7.5), (13.5, 2.0)
 ]
 
-
-# User-supplied planning inventory. These are intentionally marked PLANNED:
-# the desktop UI cannot prove a cable, ROS topic, or physical device exists.
 HARDWARE_COMPONENTS = [
-    {"id": "flight_stack", "name": "MicoAir h743v2 Stack", "role": "Flight-control stack; firmware/interface not specified", "group": "Flight control"},
-    {"id": "lidar", "name": "RPLiDAR C1 - DTOF LiDAR 360° Laser Range Scanner (12m, IP54)", "role": "2D range scan input for localization and SLAM", "group": "Sensing"},
-    {"id": "ai_compute", "name": "Jetson nano orin super", "role": "AI compute host for survivor detection/inference", "group": "AI compute"},
-    {"id": "ros_host", "name": "Raspberry Pi 4 Model 8GB RAM Development Board", "role": "Companion computer candidate for ROS 2 and SLAM", "group": "ROS / SLAM"},
-    {"id": "camera", "name": "Raspberry Pi Camera V2", "role": "Visual camera input for reconnaissance", "group": "Sensing"},
-    {"id": "elrs_rx_primary", "name": "Radiomaster RP1 ELRS 2.4G Receiver", "role": "Primary manual-control radio receiver", "group": "Control link"},
-    {"id": "elrs_rx_secondary", "name": "HGLRC ELRS 2.4G Receiver", "role": "Secondary/alternate ELRS receiver", "group": "Control link"},
-    {"id": "elrs_tx", "name": "Radiomaster Pocket ELRS Tx", "role": "Operator-side ELRS transmitter", "group": "Control link"},
-    {"id": "optical_flow", "name": "Micoair MTF-01 Opticalflow", "role": "Optical-flow velocity/height aid for GPS-denied flight", "group": "Sensing"},
-    {"id": "dji_o4", "name": "DJI O4 unit pro", "role": "Digital video link / air-unit candidate", "group": "Video link"},
-    {"id": "airframe", "name": "Holybro X500 V2 Barebones Frame Kit (inc. Motor & ESC & Prop)", "role": "Airframe, propulsion, ESC, and propeller assembly", "group": "Airframe"},
-    {"id": "charger", "name": "HOTA T6 DC 300W PD 90W 15A 1-6S LiPo Battery Charger", "role": "Battery charging equipment; not a flight telemetry source", "group": "Power"},
-    {"id": "battery", "name": "Molicel 21700 P45B", "role": "Battery cell / pack component", "group": "Power"},
-    {"id": "router", "name": "TP-Link Archer AX55 AX3000 Wi-Fi 6 Router", "role": "Local development and telemetry network", "group": "Network"},
+    {"id": "flight_stack", "name": "MicoAir h743v2 Stack", "role": "Flight controller / EKF state", "group": "Flight control"},
+    {"id": "lidar", "name": "RPLiDAR C1 - 360° DTOF Laser Scanner", "role": "2D range scan & SLAM obstacle map", "group": "Sensing"},
+    {"id": "ai_compute", "name": "Jetson Orin Nano Super", "role": "Onboard AI inference host for human detection", "group": "AI compute"},
+    {"id": "camera", "name": "Raspberry Pi Camera V2 / HD Gimbal", "role": "Visual reconnaissance camera feed", "group": "Sensing"},
+    {"id": "bridge", "name": "ROS 2 Humble GCS Bridge", "role": "Telemetry & Command WebSocket interface", "group": "Network"},
 ]
-
-TARGET_PLATFORM = {
-    "os": "Ubuntu 22.04 LTS - Jammy Jellyfish",
-    "ros": "ROS 2 Humble (target; Ubuntu 22.04 compatible)",
-    "slam": "ROS 2 SLAM stack (LiDAR driver + localization; package selection pending)",
-    "ai": "Jetson nano orin super - AI inference host",
-    "note": "Planning target only; hardware and ROS topics are not detected by this desktop UI.",
-}
 
 
 def default_frame() -> Dict[str, Any]:
+    """Produce a safe, initialized baseline telemetry frame."""
     return {
-        "mode": "AUTONOMOUS",
-        "phase": "EXPLORING",
-        "mission_seconds": 741,
-        "coverage": 64,
+        "source_type": "SIMULATION",
+        "source_label": "SIMULATION - READY",
+        "mode": "RTL / LAND",
+        "phase": "STANDBY",
+        "mission_seconds": 0,
+        "coverage": 0,
         "target": "S01",
-        "drone": {"x": 7.0, "y": 6.0, "heading": 228, "altitude": 2.35, "speed": 1.19},
-        "telemetry": {"battery": 87, "voltage": 22.4, "current": 8.2, "link_ms": 37, "quality": 98},
-        "sensors": {"lidar": "ACTIVE", "slam": "ACTIVE", "vision": "ACTIVE", "wifi": "CONNECTED", "mavlink": "CONNECTED"},
-        "health": {name: "READY" for name in (
-            "Flight Controller", "Camera Sensor", "3D Localization EKF", "Mapping Engine",
-            "Survivor AI", "Local Communication", "Emergency System",
-        )},
-        "components": {},
-        "component_status": {item["id"]: "PLANNED" for item in HARDWARE_COMPONENTS},
-        "hardware_components": [dict(item) for item in HARDWARE_COMPONENTS],
-        "target_platform": dict(TARGET_PLATFORM),
-        "survivors": [dict(item) for item in DEFAULT_SURVIVORS],
-        "events": [
-            "[08:42:15]  [INFO]  Waypoint WP-09 reached. Scanning Corridor Beta.",
-            "[08:41:25]  [INFO]  Survivor S02 localized at Grid C4 (Localization Conf: 85%).",
-        ],
-        "source_label": "SYNTHETIC FEED",
+        "drone": {
+            "x": 7.0,
+            "y": 6.0,
+            "z": 1.20,
+            "heading": 228.0,
+            "yaw": 228.0,
+            "altitude": 1.20,
+            "speed": 0.0,
+        },
+        "telemetry": {
+            "battery": 87,
+            "voltage": 22.4,
+            "current": 8.2,
+            "link_ms": 37,
+            "quality": 98,
+            "mode": "RTL / LAND",
+            "speed": 0.0,
+            "heading": 228.0,
+            "altitude": 1.20,
+            "gps": "OPT_FLOW",
+            "position": "OK",
+            "flight_time": "00:00",
+        },
+        "sensors": {
+            "lidar": "ACTIVE",
+            "radar": "ACTIVE",
+            "vision": "ACTIVE",
+            "wifi": "ACTIVE",
+            "mavlink": "ACTIVE",
+            "connected": "ACTIVE",
+        },
+        "health": {
+            "Jetson Orin": "OK",
+            "Jetson Gimbal / Mount": "OK",
+            "RPLIDAR C1": "OK",
+            "ROS 2 Bridge": "SIMULATED",
+            "MAVLink": "OK",
+        },
+        "survivors": [],
+        "staged_waypoints": [],
+        "accepted_waypoints": [list(pt) for pt in PATROL_WAYPOINTS[:5]],
+        "events": [],
     }
-
-
-def deep_merge(base: Dict[str, Any], incoming: Dict[str, Any], _nested: bool = False) -> Dict[str, Any]:
-    """Merge a normalized partial payload while retaining safe defaults.
-
-    Unknown top-level fields are ignored, while nested extension maps such as
-    ``components`` can add a new named status without requiring a UI release.
-    """
-    result = dict(base)
-    for key, value in incoming.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = deep_merge(result[key], value, _nested=True)
-        elif key in result or _nested:
-            result[key] = value
-    return result
 
 
 @dataclass
@@ -114,40 +179,225 @@ class PluginResult:
 
 
 class DataPlugin:
-    name = "Data source"
+    name: str = "Base Data Source"
 
     def poll(self) -> PluginResult:
         return PluginResult()
 
+    def send_command(self, cmd: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return {"status": "REJECTED", "message": "Command not supported by this plugin"}
+
 
 class SimulationPlugin(DataPlugin):
+    """Deterministic, hardware-free simulation engine."""
     name = "Simulation"
 
     def __init__(self) -> None:
-        self.started_at = time.monotonic()
+        self.is_running = True
+        self.is_paused = False
+        self.start_time = time.monotonic()
+        self.pause_time = 0.0
+        self.total_paused_duration = 0.0
+        self.flight_mode = "RTL / LAND"
+        self.phase = "EXPLORING"
+        self.base_battery = 87.0
+        self.staged_waypoints: List[Tuple[float, float, str]] = []
+        self.accepted_waypoints: List[Tuple[float, float]] = list(PATROL_WAYPOINTS[:6])
+        self.user_marked_survivors: List[Dict[str, Any]] = []
+
+    def start(self) -> None:
+        if not self.is_running:
+            self.reset()
+        self.is_running = True
+        self.is_paused = False
+
+    def pause(self) -> None:
+        if self.is_running and not self.is_paused:
+            self.is_paused = True
+            self.pause_time = time.monotonic()
+
+    def resume(self) -> None:
+        if self.is_running and self.is_paused:
+            self.is_paused = False
+            self.total_paused_duration += time.monotonic() - self.pause_time
+
+    def reset(self) -> None:
+        self.start_time = time.monotonic()
+        self.pause_time = 0.0
+        self.total_paused_duration = 0.0
+        self.is_running = True
+        self.is_paused = False
+        self.flight_mode = "RTL / LAND"
+        self.phase = "EXPLORING"
+        self.staged_waypoints.clear()
+        self.user_marked_survivors.clear()
+
+    def get_elapsed_seconds(self) -> float:
+        if not self.is_running:
+            return 0.0
+        if self.is_paused:
+            return max(0.0, self.pause_time - self.start_time - self.total_paused_duration)
+        return max(0.0, time.monotonic() - self.start_time - self.total_paused_duration)
 
     def poll(self) -> PluginResult:
-        elapsed = time.monotonic() - self.started_at
-        segment = elapsed * 0.28
-        index = int(segment) % len(SIMULATION_ROUTE)
-        next_index = (index + 1) % len(SIMULATION_ROUTE)
-        fraction = segment - int(segment)
-        start = SIMULATION_ROUTE[index]
-        end = SIMULATION_ROUTE[next_index]
-        x = start[0] + (end[0] - start[0]) * fraction
-        y = start[1] + (end[1] - start[1]) * fraction
-        heading = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0])) % 360
-        return PluginResult(
-            frame={
-                "mission_seconds": 741 + int(elapsed),
-                "source_label": "SYNTHETIC FEED",
-                "drone": {"x": round(x, 2), "y": round(y, 2), "heading": round(heading), "altitude": 2.35, "speed": 1.19},
+        elapsed = self.get_elapsed_seconds()
+        sim_sec = int(elapsed)
+
+        # 1. Kinematics along patrol route
+        speed = 1.2 if self.flight_mode != "EMERGENCY LAND" else 0.0
+        route = self.accepted_waypoints if self.accepted_waypoints else PATROL_WAYPOINTS
+        if len(route) >= 2:
+            seg_duration = 6.0  # seconds per waypoint segment
+            total_duration = seg_duration * (len(route) - 1)
+            t_route = (elapsed * 0.8) % total_duration
+            seg_idx = int(t_route / seg_duration)
+            next_idx = min(len(route) - 1, seg_idx + 1)
+            frac = (t_route - (seg_idx * seg_duration)) / seg_duration
+
+            p1 = route[seg_idx]
+            p2 = route[next_idx]
+            cur_x = p1[0] + (p2[0] - p1[0]) * frac
+            cur_y = p1[1] + (p2[1] - p1[1]) * frac
+
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            yaw = (math.degrees(math.atan2(dy, dx))) % 360
+        else:
+            cur_x, cur_y, yaw = 7.0, 6.0, 228.0
+
+        # Altitude & Battery
+        alt = 2.35 if self.flight_mode != "EMERGENCY LAND" else max(0.0, 2.35 - (elapsed % 10) * 0.4)
+        battery_pct = max(5, int(self.base_battery - (elapsed * 0.015)))
+        voltage = round(19.8 + (battery_pct / 100.0) * 3.0, 1)
+
+        # 2. Dynamic Sequential Survivor Discovery
+        active_survivors: List[Dict[str, Any]] = []
+        for cand in SIM_SURVIVORS_MASTER:
+            if sim_sec >= cand["discover_sec"]:
+                active_survivors.append(dict(cand))
+
+        # Include any manually marked survivors
+        active_survivors.extend(self.user_marked_survivors)
+
+        # 3. Dynamic Coverage Calculation
+        # Incremental coverage starting at 42% climbing to 92%
+        coverage = min(92, int(42 + min(50.0, elapsed * 0.8)))
+
+        # Format flight time MM:SS
+        mins = sim_sec // 60
+        secs = sim_sec % 60
+        flight_time_str = f"{mins:02d}:{secs:02d}"
+
+        frame: Dict[str, Any] = {
+            "source_type": "SIMULATION",
+            "source_label": "SIMULATION - READY",
+            "mode": self.flight_mode,
+            "phase": self.phase,
+            "mission_seconds": sim_sec,
+            "coverage": coverage,
+            "target": active_survivors[0]["id"] if active_survivors else "—",
+            "drone": {
+                "x": round(cur_x, 2),
+                "y": round(cur_y, 2),
+                "z": round(alt, 2),
+                "heading": round(yaw),
+                "yaw": round(yaw),
+                "altitude": round(alt, 1),
+                "speed": round(speed, 1),
             },
-            detail="Local deterministic route preview; no vehicle command sent",
-        )
+            "telemetry": {
+                "battery": battery_pct,
+                "voltage": voltage,
+                "current": 8.2 if speed > 0 else 1.5,
+                "link_ms": 35 + int((sim_sec % 5) * 2),
+                "quality": 98,
+                "mode": self.flight_mode,
+                "speed": round(speed, 1),
+                "heading": round(yaw),
+                "altitude": round(alt, 1),
+                "gps": "OPT_FLOW",
+                "position": "OK",
+                "flight_time": flight_time_str,
+            },
+            "sensors": {
+                "lidar": "ACTIVE",
+                "radar": "ACTIVE",
+                "vision": "ACTIVE",
+                "wifi": "ACTIVE",
+                "mavlink": "ACTIVE",
+                "connected": "ACTIVE",
+            },
+            "health": {
+                "Jetson Orin": "OK (SIM)",
+                "Jetson Gimbal / Mount": "OK (SIM)",
+                "RPLIDAR C1": "OK (SIM)",
+                "ROS 2 Bridge": "SIMULATED",
+                "MAVLink": "OK (SIM)",
+            },
+            "survivors": active_survivors,
+            "staged_waypoints": [list(w) for w in self.staged_waypoints],
+            "accepted_waypoints": [list(w) for w in self.accepted_waypoints],
+        }
+
+        return PluginResult(frame=frame, status="SIMULATION", detail="Deterministic Local Simulation Active")
+
+    def send_command(self, cmd: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        params = params or {}
+        cmd_upper = cmd.upper()
+
+        if cmd_upper in {"ABORT", "EMERGENCY_ABORT"}:
+            self.flight_mode = "EMERGENCY LAND"
+            self.phase = "ABORTED"
+            return {"status": "ACCEPTED", "message": "Simulation emergency abort executed."}
+        elif cmd_upper == "RTL":
+            self.flight_mode = "RTL / LAND"
+            self.phase = "RTL"
+            return {"status": "ACCEPTED", "message": "Simulation RTL commanded."}
+        elif cmd_upper == "SET_MODE":
+            mode_name = params.get("mode", "MANUAL")
+            self.flight_mode = mode_name
+            return {"status": "ACCEPTED", "message": f"Simulation mode set to {mode_name}."}
+        elif cmd_upper == "STAGE_WAYPOINT":
+            x = float(params.get("x", 0.0))
+            y = float(params.get("y", 0.0))
+            tag = str(params.get("tag", f"WP-{len(self.staged_waypoints)+1}"))
+            self.staged_waypoints.append((x, y, tag))
+            return {"status": "ACCEPTED", "message": f"Waypoint {tag} staged locally."}
+        elif cmd_upper == "COMMIT_WAYPOINTS":
+            # Promote staged waypoints to accepted waypoints
+            new_pts = [(w[0], w[1]) for w in self.staged_waypoints]
+            self.accepted_waypoints.extend(new_pts)
+            self.staged_waypoints.clear()
+            return {"status": "ACCEPTED", "message": "Staged waypoints committed to flight planner."}
+        elif cmd_upper == "CLEAR_WAYPOINTS":
+            self.staged_waypoints.clear()
+            return {"status": "ACCEPTED", "message": "Staged waypoints cleared."}
+        elif cmd_upper == "MARK_SURVIVOR":
+            surv_id = f"S{len(self.user_marked_survivors) + 5:02d}"
+            new_s = {
+                "id": surv_id,
+                "number": f"{len(self.user_marked_survivors) + 5:02d}",
+                "grid": params.get("grid", "M9"),
+                "x": float(params.get("x", 7.5)),
+                "y": float(params.get("y", 7.5)),
+                "lat": float(params.get("lat", 10.8464)),
+                "lon": float(params.get("lon", 76.2716)),
+                "confidence": 88,
+                "status": "STABLE",
+                "movement": "MANUALLY MARKED",
+                "bbox": [0.45, 0.45, 0.55, 0.55],
+                "thumb": "assets/thumb_s1.png",
+                "color_hex": "#06b6d4",
+                "discover_sec": 0,
+            }
+            self.user_marked_survivors.append(new_s)
+            return {"status": "ACCEPTED", "message": f"Survivor {surv_id} marked manually."}
+
+        return {"status": "REJECTED", "message": f"Unknown command: {cmd}"}
 
 
 class JsonFilePlugin(DataPlugin):
+    """Watches a local JSON file (e.g. data/mission.json)."""
     name = "JSON file"
 
     def __init__(self, path: Path) -> None:
@@ -161,71 +411,41 @@ class JsonFilePlugin(DataPlugin):
         try:
             modified = self.path.stat().st_mtime
             if self._last_frame is None or modified != self._last_modified:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                content = self.path.read_text(encoding="utf-8")
+                payload = json.loads(content)
                 if not isinstance(payload, dict):
-                    raise ValueError("payload must be a JSON object")
-                self._last_frame = payload
+                    raise ValueError("JSON payload must be a dictionary")
+                # Merge into default frame schema
+                merged = default_frame()
+                merged.update(payload)
+                merged["source_type"] = "FILE"
+                merged["source_label"] = f"FILE: {self.path.name}"
+                self._last_frame = merged
                 self._last_modified = modified
-            return PluginResult(frame=self._last_frame, detail=f"Watching {self.path.name}")
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return PluginResult(status="ERROR", detail=f"JSON input: {exc}")
+            return PluginResult(frame=self._last_frame, status="CONNECTED", detail=f"Watching {self.path.name}")
+        except Exception as exc:
+            return PluginResult(status="ERROR", detail=f"File error: {exc}")
 
 
-class HttpJsonPlugin(DataPlugin):
-    name = "HTTP JSON"
-
-    def __init__(self, endpoint: str) -> None:
-        self.endpoint = endpoint.strip()
-        self._last_poll = 0.0
-        self._last_frame: Optional[Dict[str, Any]] = None
-
-    def poll(self) -> PluginResult:
-        if not self.endpoint:
-            return PluginResult(status="WAITING", detail="Set NIDAR_HTTP_FEED environment variable or use JSON file")
-        now = time.monotonic()
-        if now - self._last_poll < 2.0:
-            return PluginResult(frame=self._last_frame, status="CONNECTED" if self._last_frame else "WAITING", detail=self.endpoint)
-        self._last_poll = now
-        try:
-            with urllib.request.urlopen(self.endpoint, timeout=0.8) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("payload must be a JSON object")
-            self._last_frame = payload
-            return PluginResult(frame=payload, status="CONNECTED", detail=self.endpoint)
-        except Exception as exc:  # network errors are intentionally contained in the adapter
-            return PluginResult(frame=self._last_frame, status="WAITING", detail=f"HTTP feed unavailable: {exc}")
-
-
-@dataclass
 class DataPluginManager:
-    data_dir: Path
-    source: str = "Simulation"
-    http_endpoint: str = field(default_factory=lambda: os.environ.get("NIDAR_HTTP_FEED", ""))
+    """Manages active data sources and routes commands."""
 
-    def __post_init__(self) -> None:
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.source = "Simulation"
         self.plugins: Dict[str, DataPlugin] = {
             "Simulation": SimulationPlugin(),
             "JSON file": JsonFilePlugin(self.data_dir / "mission.json"),
-            "HTTP JSON": HttpJsonPlugin(self.http_endpoint),
         }
 
-    def select(self, source: str, endpoint: str = "") -> None:
+    def select(self, source: str) -> None:
         if source not in self.plugins:
             raise ValueError(f"Unknown data source: {source}")
         self.source = source
-        if source == "HTTP JSON":
-            self.http_endpoint = endpoint.strip()
-            self.plugins[source] = HttpJsonPlugin(self.http_endpoint)
 
     def poll(self) -> PluginResult:
         return self.plugins[self.source].poll()
 
-    @property
-    def source_hint(self) -> str:
-        if self.source == "JSON file":
-            return str(self.data_dir / "mission.json")
-        if self.source == "HTTP JSON":
-            return self.http_endpoint or "NIDAR_HTTP_FEED"
-        return "Built-in synthetic mission"
+    def send_command(self, cmd: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self.plugins[self.source].send_command(cmd, params)
