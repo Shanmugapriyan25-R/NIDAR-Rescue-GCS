@@ -44,7 +44,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea,
-    QSplitter, QVBoxLayout, QWidget, QButtonGroup, QLineEdit
+    QSplitter, QVBoxLayout, QWidget, QButtonGroup, QLineEdit, QStackedWidget
 )
 
 from gcs_client import GCSClientWorker
@@ -52,6 +52,9 @@ from gcs_data_plugins import (
     DataPluginManager, ARENA_WIDTH_M, ARENA_HEIGHT_M,
     DESIGNATED_TARGET_IDS, MissionState
 )
+from health_model import HealthState, HealthSystemManager
+from subsystem_diagnostics import SubsystemItemWidget, SubsystemDiagnosticsDialog
+from gcs_workspaces import MapWorkspaceWidget, SurvivorsWorkspaceWidget
 
 PALETTE = {
     "bg": "#f4f7fb",           # Soft tactical grey/blue canvas background
@@ -1026,10 +1029,13 @@ class NidarRescueGCS(QMainWindow):
         self.active_source = "Simulation"
         self.survivor_cards: Dict[str, SurvivorCard] = {}
         self.last_survivor_signature: str = ""
+        self.selected_target_id: str = "S01"
+        self.diagnostics_dialog: Optional[SubsystemDiagnosticsDialog] = None
 
         # 1. Initialize Data Plugins and WebSocket Client
         self.plugin_manager = DataPluginManager(Path("data"))
         self.ws_client = GCSClientWorker(url="ws://127.0.0.1:9090")
+        self.health_manager = HealthSystemManager(is_simulation=(self.active_source == "Simulation"))
         self._setup_ws_connections()
 
         # 2. Build UI and apply styles
@@ -1039,12 +1045,13 @@ class NidarRescueGCS(QMainWindow):
         # 3. High-Frequency UI Data Loop (10 Hz)
         self.data_timer = QTimer(self)
         self.data_timer.timeout.connect(self._poll_data)
-        self.data_timer.start(100)
+        self.data_timer.start(250)
         self._poll_data()
 
         # 4. Arena animation timer (30 FPS)
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self.map_canvas.tick_anim)
+        self.anim_timer.timeout.connect(self.map_workspace.map_canvas.tick_anim)
         self.anim_timer.timeout.connect(self.camera.capture_video_frame)
         self.anim_timer.start(35)
 
@@ -1071,21 +1078,39 @@ class NidarRescueGCS(QMainWindow):
         self.setCentralWidget(root)
         main_layout = QVBoxLayout(root)
         main_layout.setContentsMargins(10, 8, 10, 8)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(6)
 
         # 1. Full-Width Top Header
         main_layout.addWidget(self._header())
 
-        # 2. Main 3-Column Content Layout
+        # 2. Central Workspace Stack (Mission / Map / Survivors)
+        self.view_stack = QStackedWidget()
+
+        # Page 0: Complete Mission Dashboard (3-Column Layout + Bottom Bar)
+        self.page_mission = QWidget()
+        pm_layout = QVBoxLayout(self.page_mission)
+        pm_layout.setContentsMargins(0, 0, 0, 0)
+        pm_layout.setSpacing(6)
+
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(8)
         columns_layout.addWidget(self._left_column(), 29)
         columns_layout.addWidget(self._center_column(), 46)
         columns_layout.addWidget(self._right_column(), 25)
-        main_layout.addLayout(columns_layout, 1)
+        pm_layout.addLayout(columns_layout, 1)
 
-        # 3. Full-Width Bottom Bar
-        main_layout.addWidget(self._bottom_bar())
+        pm_layout.addWidget(self._bottom_bar())
+        self.view_stack.addWidget(self.page_mission)
+
+        # Page 1: Dedicated Map Workspace
+        self.map_workspace = MapWorkspaceWidget(self)
+        self.view_stack.addWidget(self.map_workspace)
+
+        # Page 2: Dedicated Survivors Workspace
+        self.survivors_workspace = SurvivorsWorkspaceWidget(self)
+        self.view_stack.addWidget(self.survivors_workspace)
+
+        main_layout.addWidget(self.view_stack, 1)
 
     # --------------------------------------------------------------------------
     # Full Width Top Header Bar
@@ -1126,6 +1151,40 @@ class NidarRescueGCS(QMainWindow):
         title_box.addWidget(sub_lbl)
         row.addLayout(title_box)
 
+        row.addSpacing(14)
+
+        # Horizontal Navigation Tabs: Mission, Map, Survivors
+        tabs_box = QHBoxLayout()
+        tabs_box.setSpacing(6)
+
+        self.tab_mission = QPushButton("⌂ Mission")
+        self.tab_mission.setObjectName("navTab")
+        self.tab_mission.setProperty("active", True)
+        self.tab_mission.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_mission.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_mission.setFixedHeight(28)
+        self.tab_mission.clicked.connect(lambda: self._select_tab("Mission"))
+        tabs_box.addWidget(self.tab_mission)
+
+        self.tab_map = QPushButton("📍 Map")
+        self.tab_map.setObjectName("navTab")
+        self.tab_map.setProperty("active", False)
+        self.tab_map.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_map.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_map.setFixedHeight(28)
+        self.tab_map.clicked.connect(lambda: self._select_tab("Map"))
+        tabs_box.addWidget(self.tab_map)
+
+        self.tab_surv = QPushButton("👥 Survivors")
+        self.tab_surv.setObjectName("navTab")
+        self.tab_surv.setProperty("active", False)
+        self.tab_surv.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self.tab_surv.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_surv.setFixedHeight(28)
+        self.tab_surv.clicked.connect(lambda: self._select_tab("Survivors"))
+        tabs_box.addWidget(self.tab_surv)
+
+        row.addLayout(tabs_box)
         row.addStretch()
 
         # Flight Mode Dropdown Button
@@ -1188,7 +1247,7 @@ class NidarRescueGCS(QMainWindow):
         return bar
 
     # --------------------------------------------------------------------------
-    # Left Column: Horizontal Tabs + Drone Camera + Survivor Queue
+    # Left Column: Drone Camera + Survivor Queue
     # --------------------------------------------------------------------------
     def _left_column(self) -> QWidget:
         col = QWidget()
@@ -1196,41 +1255,7 @@ class NidarRescueGCS(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # 1. Navigation Tabs
-        tabs_box = QHBoxLayout()
-        tabs_box.setSpacing(6)
-
-        self.tab_mission = QPushButton("⌂ Mission")
-        self.tab_mission.setObjectName("navTab")
-        self.tab_mission.setProperty("active", True)
-        self.tab_mission.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        self.tab_mission.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tab_mission.setFixedHeight(28)
-        self.tab_mission.clicked.connect(lambda: self._select_tab("Mission"))
-        tabs_box.addWidget(self.tab_mission)
-
-        self.tab_map = QPushButton("📍 Map")
-        self.tab_map.setObjectName("navTab")
-        self.tab_map.setProperty("active", False)
-        self.tab_map.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        self.tab_map.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tab_map.setFixedHeight(28)
-        self.tab_map.clicked.connect(lambda: self._select_tab("Map"))
-        tabs_box.addWidget(self.tab_map)
-
-        self.tab_surv = QPushButton("👥 Survivors")
-        self.tab_surv.setObjectName("navTab")
-        self.tab_surv.setProperty("active", False)
-        self.tab_surv.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        self.tab_surv.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tab_surv.setFixedHeight(28)
-        self.tab_surv.clicked.connect(lambda: self._select_tab("Survivors"))
-        tabs_box.addWidget(self.tab_surv)
-
-        tabs_box.addStretch()
-        layout.addLayout(tabs_box)
-
-        # 2. Drone Camera Card
+        # 1. Drone Camera Card
         cam_card = card_frame()
         cam_layout = QVBoxLayout(cam_card)
         cam_layout.setContentsMargins(8, 8, 8, 8)
@@ -1667,7 +1692,7 @@ class NidarRescueGCS(QMainWindow):
         health_card = card_frame()
         health_layout = QVBoxLayout(health_card)
         health_layout.setContentsMargins(10, 8, 10, 8)
-        health_layout.setSpacing(5)
+        health_layout.setSpacing(4)
 
         h_head = QHBoxLayout()
         h_icon = QLabel("⚙")
@@ -1675,22 +1700,61 @@ class NidarRescueGCS(QMainWindow):
         h_head.addWidget(h_icon)
         h_head.addWidget(label("HARDWARE SUBSYSTEM HEALTH", 8, True))
         h_head.addStretch()
-        h_head.addWidget(label("5 CORE UNITS", 6, False, PALETTE["muted"]))
+        h_head.addWidget(label("10 UNITS · INTERACTIVE", 6, False, PALETTE["muted"]))
         health_layout.addLayout(h_head)
+
+        health_scroll = QScrollArea()
+        health_scroll.setWidgetResizable(True)
+        health_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        health_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        health_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        health_scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: 0;
+            }
+            QScrollBar:vertical {
+                width: 4px;
+                background: #f1f5f9;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                border-radius: 2px;
+            }
+        """)
+
+        health_container = QWidget()
+        health_container.setStyleSheet("background:transparent;")
+        health_list_layout = QVBoxLayout(health_container)
+        health_list_layout.setContentsMargins(0, 0, 0, 0)
+        health_list_layout.setSpacing(3)
 
         self.health_widgets: Dict[str, SubsystemItemWidget] = {}
         units = [
-            ("📹", "Jetson Orin"),
-            ("📷", "Jetson Gimbal / Mount"),
+            ("💻", "Jetson Orin"),
+            ("🎮", "RadioLink CrossFlight"),
+            ("🔋", "Power & Battery"),
             ("◎", "RPLIDAR C1"),
+            ("🧭", "IMU / GPS Localisation"),
+            ("📷", "Camera & Gimbal"),
             ("::", "ROS 2 Bridge"),
             ("🔗", "MAVLink"),
+            ("👁", "AI Detection Pipeline"),
+            ("🗺️", "SLAM & Mapping"),
+            ("(((•)))", "Obstacle Radar"),
         ]
         for icon_str, name in units:
             w = SubsystemItemWidget(icon_str, name)
             w.clicked.connect(self._on_subsystem_clicked)
             self.health_widgets[name] = w
-            health_layout.addWidget(w)
+            health_list_layout.addWidget(w)
+
+        # Legacy alias for backward compatibility
+        self.health_widgets["Jetson Gimbal / Mount"] = self.health_widgets["Camera & Gimbal"]
+
+        health_scroll.setWidget(health_container)
+        health_layout.addWidget(health_scroll, 1)
 
         layout.addWidget(health_card)
         return col
@@ -1913,19 +1977,25 @@ class NidarRescueGCS(QMainWindow):
                 border-radius: 6px;
             }}
             QPushButton#navTab {{
-                background: transparent;
-                border: 0;
+                background: #f8fafc;
+                border: 1px solid #cbd5e1;
                 border-radius: 6px;
-                color: {PALETTE['muted']};
-                padding: 4px 12px;
+                color: #475569;
+                padding: 4px 14px;
+                font-weight: bold;
             }}
             QPushButton#navTab:hover {{
-                background: #e2e8f0;
-                color: {PALETTE['ink']};
+                background: #f1f5f9;
+                color: #0f172a;
+                border-color: #94a3b8;
+            }}
+            QPushButton#navTab:focus {{
+                outline: 2px solid #bfdbfe;
             }}
             QPushButton#navTab[active='true'] {{
                 background: {PALETTE['blue']};
                 color: #ffffff;
+                border-color: #1d4ed8;
             }}
             QFrame#card {{
                 background: {PALETTE['card']};
@@ -2137,13 +2207,27 @@ class NidarRescueGCS(QMainWindow):
         })
         self.camera.is_simulated_stream = (self.active_source == "Simulation")
 
-        # 8. Subsystem Health
-        health = frame.get("health", {})
-        for name, widget in self.health_widgets.items():
-            st = health.get(name, "OK" if self.active_source == "Simulation" else "WAITING")
-            widget.set_status(st)
+        # 8. Subsystem Health & Diagnostics System
+        if hasattr(self, "health_manager"):
+            self.health_manager.update_from_telemetry_frame(frame)
+            self.health_manager.evaluate_all_freshness()
+            for name, widget in self.health_widgets.items():
+                real_name = "Camera & Gimbal" if name == "Jetson Gimbal / Mount" else name
+                sub = self.health_manager.get_subsystem(real_name)
+                if sub:
+                    widget.set_status(sub.current_state.value)
 
-        # 9. Feed label
+            if hasattr(self, "diagnostics_dialog") and self.diagnostics_dialog and self.diagnostics_dialog.isVisible():
+                self.diagnostics_dialog.refresh()
+
+        # 9. Workspace Synchronizations
+        if hasattr(self, "map_workspace"):
+            self.map_workspace.sync_frame_data(frame)
+
+        if hasattr(self, "survivors_workspace"):
+            self.survivors_workspace.sync_frame_data(frame)
+
+        # 10. Feed label
         src_label = frame.get("source_label", "SYNTHETIC FEED")
         self.feed_type_lbl.setText(f"LOCAL ENU · {src_label.upper()}")
 
@@ -2359,6 +2443,19 @@ class NidarRescueGCS(QMainWindow):
 
         menu.exec(QCursor.pos())
 
+    def commit_staged_waypoints(self) -> None:
+        self.dispatch_command("COMMIT_WAYPOINTS")
+        self.log_event("[NAV] Staged waypoints committed to active exploration route.")
+
+    def clear_staged_waypoints(self) -> None:
+        self.dispatch_command("CLEAR_WAYPOINTS")
+        self.map_canvas.staged_waypoints.clear()
+        self.map_canvas.update()
+        if hasattr(self, "map_workspace"):
+            self.map_workspace.map_canvas.staged_waypoints.clear()
+            self.map_workspace.map_canvas.update()
+        self.log_event("[NAV] All staged waypoints cleared.")
+
     def _select_tab(self, name: str) -> None:
         self.tab_mission.setProperty("active", name == "Mission")
         self.tab_map.setProperty("active", name == "Map")
@@ -2367,11 +2464,26 @@ class NidarRescueGCS(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+        if hasattr(self, "view_stack"):
+            if name == "Map":
+                self.view_stack.setCurrentIndex(1)
+                if hasattr(self, "map_workspace"):
+                    self.map_workspace.selected_target_id = self.selected_target_id
+                    if self.selected_target_id:
+                        self.map_workspace.map_canvas.select_survivor(self.selected_target_id)
+            elif name == "Survivors":
+                self.view_stack.setCurrentIndex(2)
+                if hasattr(self, "survivors_workspace"):
+                    if self.selected_target_id:
+                        self.survivors_workspace.select_target(self.selected_target_id)
+            else:
+                self.view_stack.setCurrentIndex(0)
+
         if name == "Map":
             self.log_event("[NAV] Switched view tab to Map. 2D SLAM Arena view prioritized.")
         elif name == "Survivors":
             self.log_event("[VISION] Switched view tab to Survivors. Focus locked on detection queue.")
-            if self.survivor_cards:
+            if self.survivor_cards and not self.selected_target_id:
                 first_sid = list(self.survivor_cards.keys())[0]
                 self.focus_survivor(first_sid)
         else:
@@ -2417,10 +2529,17 @@ class NidarRescueGCS(QMainWindow):
             self.log_event(f"[CAM] Video recording saved ({frames} frames): {rec_path}")
 
     def focus_survivor(self, survivor_id: str) -> None:
+        self.selected_target_id = survivor_id
         for sid, card in self.survivor_cards.items():
             card.set_selected(sid == survivor_id)
         self.map_canvas.select_survivor(survivor_id)
         self.camera.set_highlight_person(survivor_id)
+        if hasattr(self, "map_workspace"):
+            self.map_workspace.selected_target_id = survivor_id
+            self.map_workspace.map_canvas.select_survivor(survivor_id)
+            self.map_workspace.refresh_target_rows()
+        if hasattr(self, "survivors_workspace"):
+            self.survivors_workspace.select_target(survivor_id)
         self.log_event(f"[VISION] Locked tracking onto survivor target {survivor_id}.")
 
     def start_add_waypoint(self) -> None:
@@ -2451,12 +2570,49 @@ class NidarRescueGCS(QMainWindow):
         details = {
             "Jetson Orin": "Edge AI Inference Host · Model: Standby (Simulated Feed) · GPU: 38% · Temp: 44°C",
             "Jetson Gimbal / Mount": "2-Axis Brushless Gimbal · Pitch: -45° · Roll: 0° · Stabilization: ACTIVE",
+            "RadioLink CrossFlight": "ArduPilot Autopilot · Chibios · Heartbeat: 1.0 Hz · Flight Mode: GUIDED",
+            "Power & Battery System": "4S LiPo Power Module · 15.6V · 14.2A · 86% Capacity · Cell Delta: 12mV",
             "RPLIDAR C1": "DTOF 360° Laser Scanner · Range: 12m · Freq: 10 Hz · Obstacles: None",
+            "IMU / GPS / Localisation": "9-DOF EKF3 Localisation · RTK Fix · Sats: 14 · ENU Frame",
+            "Camera & Gimbal": "1080p Sony Sensor · 30 FPS · 2-Axis Gimbal · Pitch: -45° · Roll: 0°",
             "ROS 2 Bridge": "Micro-ROS / rclpy WebSocket Bridge · Port: 9090 · Topic Latency: 22ms",
             "MAVLink": "MAVLink v2 Protocol · Baud: 115200 · Heartbeat: 1 Hz · State: ACTIVE",
+            "AI Detection Pipeline": "YOLOv8-Rescue TensorRT · Infer: 28ms · Target Tracker: SORT ACTIVE",
+            "SLAM & Mapping Pipeline": "Cartographer 2D LIDAR SLAM · Map Res: 5cm · Loop Closure: ACTIVE",
+            "Obstacle Radar": "Subsystem NOT CONFIGURED on current airframe payload",
         }
         info = details.get(name, "Status: OK.")
         self.log_event(f"[SUBSYSTEM] {name}: {info}")
+        self.show_subsystem_diagnostics(name)
+
+    def show_subsystem_diagnostics(self, name: str) -> None:
+        rec = self.health_manager.get_record(name)
+        if not rec:
+            return
+        if self.diagnostics_dialog is None:
+            self.diagnostics_dialog = SubsystemDiagnosticsDialog(
+                subsystem_name=name,
+                health_manager=self.health_manager,
+                is_simulation=(self.active_source == "Simulation"),
+                parent=self,
+            )
+            self.diagnostics_dialog.state_injected.connect(self._on_subsystem_state_injected)
+        else:
+            self.diagnostics_dialog.set_subsystem(name)
+        self.diagnostics_dialog.show()
+        self.diagnostics_dialog.raise_()
+        self.diagnostics_dialog.activateWindow()
+
+    def _on_subsystem_state_injected(self, name: str, state_str: str) -> None:
+        state_enum = HealthState.from_str(state_str)
+        self.health_manager.inject_state(name, state_enum)
+        self.dispatch_command("SET_SUBSYSTEM_STATE", {"subsystem": name, "state": state_str})
+        w = self.health_widgets.get(name)
+        if w:
+            rec = self.health_manager.get_record(name)
+            if rec:
+                w.update_record(rec)
+        self.log_event(f"[DIAG] Subsystem diagnostic state injected: {name} -> {state_str}")
 
     def start_autonomous_mission(self) -> None:
         self.dispatch_command("START_MISSION")

@@ -1,3 +1,7 @@
+# ==============================================================================
+# NIDAR RESCUE GCS - GITIGNORE POLICY
+# ==============================================================================
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -16,23 +20,35 @@ env/
 env.bak/
 venv.bak/
 
+# Backup, Scratch, & Editor Temporary Files
+*.bak
+*.pre_exact_backup
+*.backup
+*.tmp
+*.orig
+*~
+*.swp
+*.swo
+
 # IDE & Editor Settings
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
 
 # Operating System Files
 Thumbs.db
 [Dd]esktop.ini
 .DS_Store
 
+# Test Artifacts, Coverage & Caches
+.pytest_cache/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+
 # Temporary Browser Profiles & Playwright artifacts
 output/playwright/*-profile*/
 output/playwright/*-profile/
-test-results/
-playwright-report/
 
 # Logs & Diagnostics
 *.log
@@ -40,6 +56,25 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Sensitive Credentials & Private Configuration
+.env
+.env.*
+*.pem
+*.key
+*.cert
+*.pfx
+*.p12
+*.secret
+credentials.json
+secrets/
+
 # Scratch & Temporary Run Dirs
 scratch/
 tmp/
+
+# Runtime Mission Captures (Snapshots & Video recordings)
+# Keep .gitkeep so directories exist for testing and runtime, but do not commit runtime files
+output/snapshots/*.jpg
+output/recordings/*
+!output/snapshots/.gitkeep
+!output/recordings/.gitkeep

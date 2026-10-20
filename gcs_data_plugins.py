@@ -570,6 +570,7 @@ class SimulationPlugin(DataPlugin):
 
         # Injected test events (strictly clamped to S01-S06)
         self.test_overrides: Dict[str, Dict[str, Any]] = {}
+        self.health_overrides: Dict[str, str] = {}
 
     @property
     def flight_mode(self) -> str:
@@ -620,6 +621,7 @@ class SimulationPlugin(DataPlugin):
         self.cur_speed = 0.0
         self.staged_waypoints.clear()
         self.test_overrides.clear()
+        self.health_overrides.clear()
         self.sm = MissionStateMachine(initial_state=MissionState.READY)
 
     def get_elapsed_seconds(self) -> float:
@@ -816,10 +818,20 @@ class SimulationPlugin(DataPlugin):
         # Coverage proportional to mission progress and targets found
         coverage_pct = min(100, int((localized_count / 6.0) * 80 + min(20.0, elapsed * 0.2)))
 
+        # Dynamic flight mode based on mission state
+        if self.is_paused or current_state == MissionState.PAUSED_HOLD:
+            mode_str = "PAUSED / SAFE HOLD"
+        elif current_state == MissionState.RETURNING_HOME:
+            mode_str = "RETURNING HOME"
+        elif current_state in {MissionState.ABORTING, MissionState.ABORTED}:
+            mode_str = "ABORTED"
+        else:
+            mode_str = "AUTONOMOUS"
+
         frame: Dict[str, Any] = {
             "source_type": "SIMULATION",
-            "source_label": "SIMULATION - READY",
-            "mode": "AUTONOMOUS",
+            "source_label": f"SIMULATION - {current_state}",
+            "mode": mode_str,
             "phase": self.sm.get_state(),
             "mission_seconds": sim_sec,
             "coverage": coverage_pct,
@@ -843,7 +855,7 @@ class SimulationPlugin(DataPlugin):
                 "current": 8.2 if self.cur_speed > 0 else 1.5,
                 "link_ms": 35 + int((sim_sec % 4) * 2),
                 "quality": 98,
-                "mode": "AUTONOMOUS",
+                "mode": mode_str,
                 "speed": self.cur_speed,
                 "heading": self.cur_yaw,
                 "altitude": self.cur_alt,
@@ -860,11 +872,18 @@ class SimulationPlugin(DataPlugin):
                 "connected": "ACTIVE",
             },
             "health": {
-                "Jetson Orin": "OK (SIM)",
-                "Jetson Gimbal / Mount": "OK (SIM)",
-                "RPLIDAR C1": "OK (SIM)",
-                "ROS 2 Bridge": "SIMULATED",
-                "MAVLink": "OK (SIM)",
+                "Jetson Orin": self.health_overrides.get("Jetson Orin", "OK (SIM)"),
+                "Jetson Gimbal / Mount": self.health_overrides.get("Jetson Gimbal / Mount", "OK (SIM)"),
+                "Camera & Gimbal": self.health_overrides.get("Camera & Gimbal", "OK (SIM)"),
+                "RadioLink CrossFlight": self.health_overrides.get("RadioLink CrossFlight", "OK (SIM)"),
+                "Power & Battery": self.health_overrides.get("Power & Battery", "OK (SIM)"),
+                "RPLIDAR C1": self.health_overrides.get("RPLIDAR C1", "OK (SIM)"),
+                "IMU / GPS Localisation": self.health_overrides.get("IMU / GPS Localisation", "OK (SIM)"),
+                "ROS 2 Bridge": self.health_overrides.get("ROS 2 Bridge", "SIMULATED"),
+                "MAVLink": self.health_overrides.get("MAVLink", "OK (SIM)"),
+                "AI Detection Pipeline": self.health_overrides.get("AI Detection Pipeline", "OK (SIM)"),
+                "SLAM & Mapping": self.health_overrides.get("SLAM & Mapping", "OK (SIM)"),
+                "Obstacle Radar": self.health_overrides.get("Obstacle Radar", "NOT CONFIGURED"),
             },
             "survivors": roster_targets,
             "active_waypoint_idx": self.current_wp_idx,
@@ -963,6 +982,12 @@ class SimulationPlugin(DataPlugin):
                 }
             self.test_overrides[tid] = params
             return {"status": "ACCEPTED", "message": f"Target {tid} override applied."}
+
+        elif cmd_upper in {"SET_SUBSYSTEM_STATE", "INJECT_SUBSYSTEM_STATE"}:
+            sub_name = str(params.get("name", ""))
+            sub_state = str(params.get("state", "OK (SIM)"))
+            self.health_overrides[sub_name] = sub_state
+            return {"status": "ACCEPTED", "message": f"Subsystem {sub_name} state set to {sub_state}."}
 
         elif cmd_upper == "CLEAR_TARGET_OVERRIDES":
             self.test_overrides.clear()
